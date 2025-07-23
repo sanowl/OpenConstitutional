@@ -9,6 +9,7 @@ from typing import Dict, List, Any, Optional
 from dataclasses import dataclass
 
 from ..utils.logging import get_logger
+import secrets
 
 logger = get_logger(__name__)
 
@@ -142,13 +143,11 @@ def split_dataset(
     """Split dataset into train/val/test."""
     
     assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6, "Ratios must sum to 1.0"
-    
-    import random
-    random.seed(seed)
+    secrets.SystemRandom().seed(seed)
     
     # Get indices
     indices = list(range(len(dataset)))
-    random.shuffle(indices)
+    secrets.SystemRandom().shuffle(indices)
     
     # Calculate split points
     train_end = int(len(indices) * train_ratio)
@@ -178,11 +177,9 @@ def create_balanced_dataset(
     seed: int = 42
 ) -> Dataset:
     """Create a balanced dataset by sampling equal numbers from each class."""
-    
-    import random
     from collections import defaultdict
     
-    random.seed(seed)
+    secrets.SystemRandom().seed(seed)
     
     # Group examples by class
     class_examples = defaultdict(list)
@@ -201,7 +198,7 @@ def create_balanced_dataset(
     # Sample equal numbers from each class
     balanced_indices = []
     for class_value, indices in class_examples.items():
-        sampled_indices = random.sample(indices, min_class_size)
+        sampled_indices = secrets.SystemRandom().sample(indices, min_class_size)
         balanced_indices.extend(sampled_indices)
         
     # Create balanced dataset

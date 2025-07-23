@@ -10,6 +10,7 @@ import json
 from dataclasses import dataclass
 
 from ..utils.logging import get_logger
+import secrets
 
 logger = get_logger(__name__)
 
@@ -161,8 +162,6 @@ class PreferenceDataset(Dataset):
         
     def balance_preferences(self) -> "PreferenceDataset":
         """Balance the dataset to have equal A/B preferences using multiple strategies."""
-        
-        import random
         from collections import defaultdict
         
         # Analyze current preference distribution
@@ -176,7 +175,7 @@ class PreferenceDataset(Dataset):
         # Strategy 1: Create balanced pairs by flipping half the examples
         balanced_data = []
         shuffled_examples = self.examples.copy()
-        random.shuffle(shuffled_examples)
+        secrets.SystemRandom().shuffle(shuffled_examples)
         
         # Calculate target counts for perfect balance
         total_examples = len(shuffled_examples)
@@ -188,7 +187,7 @@ class PreferenceDataset(Dataset):
         
         for example in shuffled_examples:
             # Decide whether to keep as A or flip to B based on current counts
-            if a_count < target_a_count and (b_count >= target_b_count or random.random() < 0.5):
+            if a_count < target_a_count and (b_count >= target_b_count or secrets.SystemRandom().random() < 0.5):
                 # Keep as A (chosen response wins)
                 item = {
                     "question": example.question,
@@ -429,11 +428,9 @@ class PreferenceDataset(Dataset):
     def split_dataset(self, train_ratio: float = 0.8) -> tuple["PreferenceDataset", "PreferenceDataset"]:
         """Split dataset into train and validation sets."""
         
-        import random
-        
         # Shuffle examples
         shuffled_examples = self.examples.copy()
-        random.shuffle(shuffled_examples)
+        secrets.SystemRandom().shuffle(shuffled_examples)
         
         # Split
         split_idx = int(len(shuffled_examples) * train_ratio)

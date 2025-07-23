@@ -10,6 +10,7 @@ import os
 import sys
 import argparse
 from pathlib import Path
+import secrets
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -85,9 +86,8 @@ def set_seed(seed: int):
     """Set random seed for reproducibility."""
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    import random
     import numpy as np
-    random.seed(seed)
+    secrets.SystemRandom().seed(seed)
     np.random.seed(seed)
 
 
