@@ -5,6 +5,7 @@ from .critique_model import CritiqueModel
 from .revision_model import RevisionModel
 from .preference_model import PreferenceModel
 from .reward_model import RewardModel
+from .critic_model import CriticModel
 
 __all__ = [
     "ConstitutionalAIModel",
@@ -12,4 +13,5 @@ __all__ = [
     "RevisionModel",
     "PreferenceModel",
     "RewardModel",
+    "CriticModel",
 ]

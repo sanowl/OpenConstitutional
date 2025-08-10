@@ -254,6 +254,19 @@ class BenchmarkEvaluator:
             "bert_score_recall": np.mean(similarities),
             "bert_score_f1": np.mean(similarities)
         }
+
+    def compute_bert_score(self, responses: List[str], references: List[str]) -> Dict[str, float]:
+        """Optional: real BERTScore using bert_score library if available and enabled."""
+        try:
+            from bert_score import score as bert_score
+        except Exception as e:
+            raise RuntimeError("bert_score not available; install bert-score")
+        P, R, F1 = bert_score(responses, references, model_type=self.config.evaluation.bert_score_model_type)
+        return {
+            "bert_score_precision": float(P.mean().item()),
+            "bert_score_recall": float(R.mean().item()),
+            "bert_score_f1": float(F1.mean().item()),
+        }
         
     def _compute_proxy_perplexity(
         self, questions: List[str], responses: List[str]
@@ -287,6 +300,30 @@ class BenchmarkEvaluator:
             "perplexity_std": np.std(finite_perplexities) if finite_perplexities else 0.0,
             "perplexity_min": np.min(finite_perplexities) if finite_perplexities else float('inf'),
             "perplexity_max": np.max(finite_perplexities) if finite_perplexities else float('inf')
+        }
+
+    def compute_perplexity(self, responses: List[str]) -> Dict[str, float]:
+        """Optional: true perplexity from a small causal LM if enabled and available."""
+        import torch
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+        model_name = self.config.evaluation.perplexity_model_name
+        tok = AutoTokenizer.from_pretrained(model_name)
+        if tok.pad_token is None:
+            tok.pad_token = tok.eos_token
+        model = AutoModelForCausalLM.from_pretrained(model_name)
+        model.eval()
+        ppl_list = []
+        with torch.no_grad():
+            for text in responses:
+                enc = tok(text, return_tensors="pt")
+                out = model(**enc, labels=enc.input_ids)
+                nll = out.loss.item()
+                ppl_list.append(np.exp(nll))
+        return {
+            "perplexity_mean": float(np.mean(ppl_list)) if ppl_list else float('inf'),
+            "perplexity_std": float(np.std(ppl_list)) if ppl_list else 0.0,
+            "perplexity_min": float(np.min(ppl_list)) if ppl_list else float('inf'),
+            "perplexity_max": float(np.max(ppl_list)) if ppl_list else float('inf'),
         }
         
     def _compute_diversity_metrics(

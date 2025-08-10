@@ -54,19 +54,18 @@ class ConstitutionalDataset(Dataset):
                 split=self.split,
                 streaming=False
             )
-            
             if self.max_samples:
                 dataset = dataset.select(range(min(self.max_samples, len(dataset))))
-                
             for item in dataset:
                 example = self._process_item(item)
                 if example:
                     examples.append(example)
-                    
         except Exception as e:
             logger.error(f"Error loading dataset: {e}")
-            # Create dummy examples for testing
-            examples = self._create_dummy_examples()
+            if self.config.data.allow_dummy_data:
+                examples = self._create_dummy_examples()
+            else:
+                raise
             
         return examples
         
@@ -98,21 +97,20 @@ class ConstitutionalDataset(Dataset):
             
     def _extract_question(self, conversation: str) -> str:
         """Extract question from conversation."""
-        # Simple heuristic for HH-RLHF format
-        lines = conversation.split('\n')
+        # Basic parsing with role markers; fall back conservatively
+        lines = [l for l in conversation.split('\n') if l.strip()]
         for line in lines:
-            if line.startswith("Human:"):
-                return line.replace("Human:", "").strip()
-        return conversation[:200]  # fallback
+            if line.lower().startswith("human:"):
+                return line.split(":", 1)[1].strip()
+        return lines[0].strip() if lines else conversation[:200]
         
     def _extract_response(self, conversation: str) -> str:
         """Extract response from conversation."""
-        # Simple heuristic for HH-RLHF format
-        lines = conversation.split('\n')
+        lines = [l for l in conversation.split('\n') if l.strip()]
         for line in lines:
-            if line.startswith("Assistant:"):
-                return line.replace("Assistant:", "").strip()
-        return conversation[200:]  # fallback
+            if line.lower().startswith("assistant:"):
+                return line.split(":", 1)[1].strip()
+        return ""
         
     def _create_dummy_examples(self) -> List[ConstitutionalExample]:
         """Create dummy examples for testing."""

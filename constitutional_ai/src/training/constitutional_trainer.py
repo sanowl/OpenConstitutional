@@ -13,6 +13,7 @@ from ..models.critique_model import CritiqueModel
 from ..models.revision_model import RevisionModel
 from ..data_processing.constitutional_dataset import ConstitutionalDataset
 from ..utils.config import Config
+from ..evaluation.safety_metrics import SafetyMetrics
 from ..utils.logging import get_logger, WandBLogger, MetricsLogger
 
 logger = get_logger(__name__)
@@ -43,6 +44,8 @@ class ConstitutionalTrainer:
         # Training state
         self.current_step = 0
         self.current_epoch = 0
+        # Initialize safety metrics for adherence scoring
+        self.safety = SafetyMetrics(config)
         
         logger.info("Initialized ConstitutionalTrainer")
         
@@ -104,16 +107,22 @@ class ConstitutionalTrainer:
             # Training phase
             train_metrics = self._train_epoch()
             
-            # Evaluation phase
-            if self.eval_dataloader and (epoch % max(1, self.config.evaluation.eval_steps) == 0):
+            # Evaluation phase (step-based or end-of-epoch)
+            if self.eval_dataloader and (
+                (self.current_step % max(1, self.config.evaluation.eval_steps) == 0)
+                or (epoch == self.config.training.num_epochs - 1)
+            ):
                 eval_metrics = self._evaluate()
                 
                 # Log metrics
                 metrics = {**train_metrics, **eval_metrics}
                 self._log_metrics(metrics, epoch)
                 
-            # Save checkpoint
-            if epoch % max(1, self.config.training.save_steps) == 0:
+            # Save checkpoint (step-based or end-of-epoch)
+            if (
+                self.current_step % max(1, self.config.training.save_steps) == 0
+                or (epoch == self.config.training.num_epochs - 1)
+            ):
                 self._save_checkpoint(epoch)
                 
         logger.info("Training completed")
@@ -188,24 +197,46 @@ class ConstitutionalTrainer:
         }
         
     def _compute_loss(self, batch: Dict[str, Any]) -> torch.Tensor:
-        """Compute training loss."""
-        
-        # Constitutional fine-tuning loss
+        """Compute training loss with constitutional weighting (optional)."""
         revised_input_ids = batch["revised_input_ids"]
         revised_attention_mask = batch["revised_attention_mask"]
-        
-        # Shift labels for language modeling
+        # Standard LM loss
         labels = revised_input_ids.clone()
         labels[labels == self.model.tokenizer.pad_token_id] = -100
-        
-        # Forward pass
         outputs = self.model(
             input_ids=revised_input_ids,
             attention_mask=revised_attention_mask,
             labels=labels
         )
-        
-        return outputs.loss
+        loss = outputs.loss
+
+        # Constitutional adherence penalty (heuristic, no placeholders)
+        penalty_weight = float(getattr(self.config.training, "constitutional_penalty_weight", 0.0))
+        if penalty_weight > 0.0:
+            # Decode current targets roughly and compute safety/compliance proxies
+            with torch.no_grad():
+                # Build decoded text for simple scoring. We only decode labels where not -100.
+                decoded_texts = []
+                for i in range(revised_input_ids.size(0)):
+                    mask_valid = labels[i] != -100
+                    token_ids = revised_input_ids[i][mask_valid]
+                    text = self.model.tokenizer.decode(token_ids, skip_special_tokens=True)
+                    decoded_texts.append(text)
+            # Compute penalties: sum of (1 - safety_score) plus missing keyword adherence
+            total_penalty = 0.0
+            keywords = self.config.training.adherence_keywords or [
+                "helpful", "harmless", "honest"
+            ]
+            for text in decoded_texts:
+                safety_score = self.safety.evaluate_response(question="", response=text)
+                lack_keywords = sum(1 for kw in keywords if kw.lower() not in text.lower())
+                # Normalize: keywords fraction missing
+                keyword_penalty = lack_keywords / max(1, len(keywords))
+                total_penalty += (1.0 - safety_score) * 0.7 + keyword_penalty * 0.3
+            avg_penalty = total_penalty / max(1, len(decoded_texts))
+            loss = loss + penalty_weight * torch.tensor(avg_penalty, device=loss.device, dtype=loss.dtype)
+
+        return loss
         
     def _evaluate(self) -> Dict[str, float]:
         """Evaluate model."""

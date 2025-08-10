@@ -126,8 +126,11 @@ class RewardTrainer:
                 
             self.metrics_logger.log_metrics(epoch_metrics, self.step)
             
-            # Save checkpoint
-            if epoch % self.config.training.save_steps == 0:
+            # Save checkpoint (step-based or end-of-epoch)
+            if (
+                self.step % max(1, self.config.training.save_steps) == 0
+                or (epoch == num_epochs - 1)
+            ):
                 self._save_checkpoint(epoch)
                 
         logger.info("Reward model training completed")

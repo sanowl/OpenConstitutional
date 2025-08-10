@@ -120,6 +120,8 @@ class ConstitutionalEvaluator:
             )
             evaluation_results["benchmarks"] = benchmark_results
             
+        # Placeholder: constitutional adherence scoring (per-principle) could be added here
+            
         # Generate summary
         summary = self._generate_evaluation_summary(evaluation_results)
         evaluation_results["summary"] = summary
@@ -291,10 +293,18 @@ class ConstitutionalEvaluator:
         reference_responses: Optional[List[str]] = None
     ) -> Dict[str, Any]:
         """Evaluate using standard benchmarks."""
-        
-        return self.benchmark_evaluator.evaluate(
+        results = self.benchmark_evaluator.evaluate(
             questions, responses, reference_responses
         )
+        # Optional: real metrics
+        try:
+            if self.config.evaluation.use_real_metrics and reference_responses is not None:
+                results["bert_score"] = self.benchmark_evaluator.compute_bert_score(responses, reference_responses)
+            if self.config.evaluation.use_real_metrics:
+                results["perplexity"] = self.benchmark_evaluator.compute_perplexity(responses)
+        except Exception as e:
+            logger.warning(f"Real metric computation skipped: {e}")
+        return results
         
     def _score_constitutional_compliance(self, critique_output) -> float:
         """Score constitutional compliance based on critique."""

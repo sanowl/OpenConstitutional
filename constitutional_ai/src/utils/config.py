@@ -18,7 +18,8 @@ class ModelConfig:
     pad_token_id: int = 50256
     eos_token_id: int = 50256
     device: str = "cuda"
-    dtype: str = "float16"
+    dtype: str = "float16"  # will fallback to float32 on CPU
+    use_principle_tokens: bool = False
 
 
 @dataclass
@@ -26,7 +27,7 @@ class TrainingConfig:
     """Configuration for training settings."""
     batch_size: int = 4
     gradient_accumulation_steps: int = 8
-    learning_rate: float = 5e-5
+    learning_rate: float = 2e-5
     num_epochs: int = 3
     max_steps: int = -1
     warmup_steps: int = 100
@@ -43,6 +44,9 @@ class TrainingConfig:
     lora_r: int = 8
     lora_alpha: int = 32
     lora_dropout: float = 0.1
+    # Constitutional adherence regularization
+    constitutional_penalty_weight: float = 0.2
+    adherence_keywords: Optional[List[str]] = None
 
 
 @dataclass
@@ -52,8 +56,8 @@ class PPOConfig:
     mini_batch_size: int = 1
     ppo_epochs: int = 4
     learning_rate: float = 1.4e-5
-    init_kl_coef: float = 0.2
-    target_kl: float = 6.0
+    init_kl_coef: float = 0.02
+    target_kl: float = 0.1
     adap_kl_ctrl: bool = True
     gamma: float = 1.0
     lam: float = 0.95
@@ -78,6 +82,7 @@ class DataConfig:
     shuffle: bool = True
     num_workers: int = 4
     preprocessing_num_workers: int = 4
+    allow_dummy_data: bool = False
 
 
 @dataclass
@@ -90,6 +95,9 @@ class EvaluationConfig:
     metrics: List[str] = field(default_factory=lambda: ["helpfulness", "harmlessness", "honesty"])
     human_eval: bool = False
     safety_eval: bool = True
+    use_real_metrics: bool = False
+    bert_score_model_type: str = "roberta-large"
+    perplexity_model_name: str = "gpt2"
 
 
 @dataclass
@@ -100,7 +108,7 @@ class LoggingConfig:
     output_dir: str = "outputs"
     logging_dir: str = "logs"
     log_level: str = "INFO"
-    use_wandb: bool = True
+    use_wandb: bool = False
     wandb_project: str = "constitutional-ai"
     wandb_entity: Optional[str] = None
     save_model: bool = True
@@ -130,6 +138,12 @@ class Config:
     critique_temperature: float = 0.7
     revision_temperature: float = 0.7
     preference_temperature: float = 0.7
+    # Constitutional weighting
+    principle_weights: Dict[str, float] = field(default_factory=lambda: {
+        "helpfulness": 1.0,
+        "harmlessness": 1.0,
+        "honesty": 1.0
+    })
 
 
 def load_config(config_path: str) -> Config:

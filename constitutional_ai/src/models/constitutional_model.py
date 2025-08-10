@@ -25,14 +25,15 @@ class GenerationOutput:
 class ConstitutionalAIModel(nn.Module):
     """Main Constitutional AI model class."""
     
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, pretrained_path: Optional[str] = None):
         super().__init__()
         self.config = config
         self.model_name = config.model.model_name
         self.device = config.model.device
         
-        # Load tokenizer and model
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+        # Load tokenizer and model (optionally from a pretrained path)
+        load_source = pretrained_path or self.model_name
+        self.tokenizer = AutoTokenizer.from_pretrained(load_source)
         # Resolve dtype safely for the selected device
         requested_dtype_name = getattr(config.model, "dtype", "float32")
         requested_dtype = getattr(torch, requested_dtype_name, torch.float32)
@@ -41,7 +42,7 @@ class ConstitutionalAIModel(nn.Module):
                 f"Requested dtype {requested_dtype_name} is not ideal on CPU; falling back to float32.")
             requested_dtype = torch.float32
         self.model = AutoModelForCausalLM.from_pretrained(
-            self.model_name,
+            load_source,
             torch_dtype=requested_dtype,
         )
         self.model.to(self.device)
@@ -83,7 +84,11 @@ class ConstitutionalAIModel(nn.Module):
         **kwargs
     ) -> List[GenerationOutput]:
         """Generate text from prompt."""
-        
+        # Optionally allow principle tokens conditioning
+        if self.config.model.use_principle_tokens and kwargs.get("principles"):
+            principles: List[str] = kwargs.pop("principles")
+            prefix = "\n".join([f"[PRINCIPLE] {p}" for p in principles]) + "\n"
+            prompt = prefix + prompt
         # Tokenize input
         inputs = self.tokenizer(
             prompt,
@@ -167,9 +172,7 @@ class ConstitutionalAIModel(nn.Module):
     @classmethod
     def from_pretrained(cls, model_path: str, config: Config) -> "ConstitutionalAIModel":
         """Load model from pretrained checkpoint."""
-        instance = cls(config)
-        instance.model = AutoModelForCausalLM.from_pretrained(model_path)
-        instance.tokenizer = AutoTokenizer.from_pretrained(model_path)
+        instance = cls(config, pretrained_path=model_path)
         logger.info(f"Model loaded from {model_path}")
         return instance
         

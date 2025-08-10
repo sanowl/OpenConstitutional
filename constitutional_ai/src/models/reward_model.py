@@ -59,17 +59,16 @@ class RewardModel(nn.Module):
         )
         
         # Get last hidden state
-        last_hidden_state = outputs.last_hidden_state
+        last_hidden_state = outputs.last_hidden_state  # [B, T, H]
         
-        # Apply attention mask to get sequence representation
-        sequence_lengths = attention_mask.sum(dim=1) - 1
-        batch_size = last_hidden_state.size(0)
-        
-        # Get the last token representation for each sequence
-        last_token_hidden = last_hidden_state[torch.arange(batch_size), sequence_lengths]
+        # Masked mean pooling over sequence (ignoring pads)
+        mask = attention_mask.unsqueeze(-1).float()  # [B, T, 1]
+        masked_sum = (last_hidden_state * mask).sum(dim=1)  # [B, H]
+        lengths = attention_mask.sum(dim=1).clamp(min=1).unsqueeze(-1).float()  # [B, 1]
+        pooled = masked_sum / lengths  # [B, H]
         
         # Apply dropout
-        hidden = self.dropout(last_token_hidden)
+        hidden = self.dropout(pooled)
         
         # Compute rewards and values
         rewards = self.reward_head(hidden).squeeze(-1)

@@ -17,6 +17,7 @@ from collections import defaultdict
 
 from ..models.constitutional_model import ConstitutionalAIModel
 from ..models.reward_model import RewardModel
+from ..models.critic_model import CriticModel
 from ..utils.config import Config, PPOConfig
 from ..utils.logging import get_logger, WandBLogger, MetricsLogger
 
@@ -28,13 +29,12 @@ class PPOBatch:
     """Batch data for PPO training."""
     queries: List[str]
     responses: List[str]
-    old_logprobs: torch.Tensor
-    advantages: torch.Tensor
-    returns: torch.Tensor
-    values: torch.Tensor
-    rewards: torch.Tensor
-    attention_mask: torch.Tensor
-    input_ids: torch.Tensor
+    input_ids: torch.Tensor          # [B, T]
+    attention_mask: torch.Tensor     # [B, T]
+    gen_mask: torch.Tensor           # [B, T-1] masks target positions belonging to generated region
+    old_token_logprobs: torch.Tensor # [B, T-1]
+    advantages_t: torch.Tensor       # [B, T-1]
+    returns_t: torch.Tensor          # [B, T-1]
 
 
 @dataclass
@@ -93,14 +93,22 @@ class PPOTrainer:
         self.model.to(self.device)
         self.ref_model.to(self.device)
         self.reward_model.to(self.device)
+        self.critic = CriticModel(config).to(self.device)
         
-        # Set reference model to eval mode
+        # Set reference and reward models to eval; critic is trainable
         self.ref_model.eval()
         self.reward_model.eval()
+        for param in self.reward_model.parameters():
+            param.requires_grad = False
         
-        # Initialize optimizer
+        # Initialize optimizers
         self.optimizer = torch.optim.Adam(
             self.model.parameters(),
+            lr=self.ppo_config.learning_rate,
+            eps=1e-5
+        )
+        self.value_optimizer = torch.optim.Adam(
+            self.critic.parameters(),
             lr=self.ppo_config.learning_rate,
             eps=1e-5
         )
@@ -210,11 +218,12 @@ class PPOTrainer:
         rollouts = {
             'queries': [],
             'responses': [],
-            'rewards': [],
-            'old_logprobs': [],
-            'values': [],
-            'advantages': [],
-            'returns': []
+            'input_ids': [],
+            'attention_mask': [],
+            'gen_mask': [],
+            'old_token_logprobs': [],
+            'advantages_t': [],
+            'returns_t': [],
         }
         
         self.model.eval()
@@ -226,29 +235,89 @@ class PPOTrainer:
                 # Generate responses
                 responses = self._generate_responses(batch_queries)
                 
-                # Compute rewards
-                rewards = self._compute_rewards(batch_queries, responses)
+                # Tokenize full texts
+                full_texts = [f"{q} {r}" for q, r in zip(batch_queries, responses)]
+                tok = self.model.tokenizer(full_texts, return_tensors="pt", padding=True, truncation=True, max_length=self.config.model.max_length).to(self.device)
+                q_tok = self.model.tokenizer(batch_queries, return_tensors="pt", padding=True, truncation=True, max_length=self.config.model.max_length).to(self.device)
+                q_lens = q_tok.attention_mask.sum(dim=1)
+                B, T = tok.input_ids.shape
+                # Build gen_mask for token predictions (aligns with positions 1..T-1)
+                gen_mask = torch.zeros((B, T-1), device=self.device, dtype=tok.attention_mask.dtype)
+                for i in range(B):
+                    start = int(torch.clamp(q_lens[i]-1, min=0, max=T-2))
+                    gen_mask[i, start:] = 1
                 
-                # Compute old log probabilities and values
-                old_logprobs, values = self._compute_logprobs_and_values(
-                    batch_queries, responses
-                )
+                # Old token logprobs
+                with torch.no_grad():
+                    outputs = self.model(**tok)
+                    logits = outputs.logits
+                    log_probs = F.log_softmax(logits, dim=-1)
+                    token_log_probs = torch.gather(log_probs[:, :-1], dim=-1, index=tok.input_ids[:, 1:].unsqueeze(-1)).squeeze(-1)
+                old_token_logprobs = token_log_probs
                 
-                # Compute advantages and returns
-                advantages, returns = self._compute_advantages_and_returns(
-                    rewards, values
-                )
+                # Sequence-level reward from reward model
+                with torch.no_grad():
+                    rewards_seq = self._compute_rewards(batch_queries, responses).float()  # [B]
+                # Per-token rewards: terminal-only shaping at last generated token
+                rewards_t = torch.zeros_like(gen_mask, dtype=torch.float32)
+                for i in range(B):
+                    # last generated index where gen_mask is 1
+                    gen_positions = (gen_mask[i] > 0).nonzero(as_tuple=False)
+                    if gen_positions.numel() > 0:
+                        last_idx = int(gen_positions[-1].item())
+                        rewards_t[i, last_idx] = rewards_seq[i]
+                
+                # Values from critic per-token (aligned to next-token predictions)
+                with torch.no_grad():
+                    token_values = self.critic(tok.input_ids, tok.attention_mask)  # [B, T]
+                    values_t = token_values[:, 1:]  # [B, T-1]
+                
+                # Compute GAE advantages and returns over generated region
+                advantages_t, returns_t = self._compute_gae(values_t, rewards_t, gen_mask)
                 
                 # Store rollouts
                 rollouts['queries'].extend(batch_queries)
                 rollouts['responses'].extend(responses)
-                rollouts['rewards'].extend(rewards.cpu().tolist())
-                rollouts['old_logprobs'].extend(old_logprobs.cpu().tolist())
-                rollouts['values'].extend(values.cpu().tolist())
-                rollouts['advantages'].extend(advantages.cpu().tolist())
-                rollouts['returns'].extend(returns.cpu().tolist())
+                rollouts['input_ids'].append(tok.input_ids.cpu())
+                rollouts['attention_mask'].append(tok.attention_mask.cpu())
+                rollouts['gen_mask'].append(gen_mask.cpu())
+                rollouts['old_token_logprobs'].append(old_token_logprobs.cpu())
+                rollouts['advantages_t'].append(advantages_t.cpu())
+                rollouts['returns_t'].append(returns_t.cpu())
                 
         return rollouts
+
+    def _compute_gae(
+        self,
+        values_t: torch.Tensor,         # [B, T-1]
+        rewards_t: torch.Tensor,        # [B, T-1]
+        gen_mask: torch.Tensor,         # [B, T-1] (0/1)
+        gamma: Optional[float] = None,
+        lam: Optional[float] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compute token-level GAE(λ) advantages and returns over generated region.
+        values_t are V(s_t) aligned to predicting token at t+1; bootstrap next value from V(s_{t+1}).
+        """
+        gamma = self.ppo_config.gamma if gamma is None else gamma
+        lam = self.ppo_config.lam if lam is None else lam
+        B, Tm1 = values_t.shape
+        advantages = torch.zeros_like(values_t)
+        last_gae = torch.zeros((B,), device=values_t.device, dtype=values_t.dtype)
+        # Append zero at end for V_{T}
+        next_values = torch.cat([values_t[:, 1:], torch.zeros(B, 1, device=values_t.device, dtype=values_t.dtype)], dim=1)
+        for t in reversed(range(Tm1)):
+            mask_t = gen_mask[:, t].float()
+            delta = rewards_t[:, t] + gamma * next_values[:, t] * mask_t - values_t[:, t]
+            last_gae = delta + gamma * lam * mask_t * last_gae
+            advantages[:, t] = last_gae * mask_t
+        returns = advantages + values_t
+        # Normalize advantages across valid tokens
+        valid = gen_mask.bool()
+        if valid.any():
+            mean = advantages[valid].mean()
+            std = advantages[valid].std(unbiased=False).clamp_min(1e-8)
+            advantages = (advantages - mean) / std
+        return advantages, returns
         
     def _generate_responses(self, queries: List[str]) -> List[str]:
         """Generate responses for queries."""
@@ -294,6 +363,16 @@ class PPOTrainer:
             truncation=True,
             max_length=self.config.model.max_length
         ).to(self.device)
+
+        # Tokenize queries separately to locate generated region
+        q_tok = self.model.tokenizer(
+            queries,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=self.config.model.max_length
+        ).to(self.device)
+        q_lens = q_tok.attention_mask.sum(dim=1)  # [B]
         
         # Forward pass through model
         with torch.no_grad():
@@ -310,13 +389,25 @@ class PPOTrainer:
             index=inputs.input_ids[:, 1:].unsqueeze(-1)
         ).squeeze(-1)
         
-        # Sum log probabilities over sequence length, mask pads
+        # Sum log probabilities over generated region only, mask pads
         attention_mask = inputs.attention_mask[:, 1:]
-        sequence_log_probs = (token_log_probs * attention_mask).sum(dim=-1)
+        B, Tm1 = attention_mask.shape
+        gen_mask = torch.zeros_like(attention_mask)
+        for i in range(B):
+            # positions >= q_lens[i] are generated (token_log_probs aligns to positions 1..T-1)
+            start = int(torch.clamp(q_lens[i]-1, min=0, max=Tm1-1))
+            gen_mask[i, start:] = 1
+        eff_mask = attention_mask * gen_mask
+        sequence_log_probs = (token_log_probs * eff_mask).sum(dim=-1)
         
-        # Compute values using reward model (masked mean over non-pad positions)
-        reward_out = self.reward_model(**inputs)
-        values = reward_out.values
+        # Compute sequence-level values from critic by averaging per-token values over generated tokens
+        token_values = self.critic(inputs.input_ids, inputs.attention_mask)  # [B, T]
+        gen_mask_full = torch.zeros_like(inputs.attention_mask)
+        for i in range(B):
+            start = int(q_lens[i])
+            gen_mask_full[i, start:] = 1
+        vmask = inputs.attention_mask * gen_mask_full
+        values = (token_values * vmask).sum(dim=1) / torch.clamp_min(vmask.sum(dim=1), 1)
         
         return sequence_log_probs, values
         
@@ -341,36 +432,38 @@ class PPOTrainer:
         """Create a mini-batch from rollouts."""
         
         # Extract data for selected indices
-        queries = [rollouts['queries'][i] for i in indices]
-        responses = [rollouts['responses'][i] for i in indices]
+        queries = [rollouts['queries'][int(i)] for i in indices]
+        responses = [rollouts['responses'][int(i)] for i in indices]
         
-        # Convert to tensors
-        old_logprobs = torch.tensor([rollouts['old_logprobs'][i] for i in indices]).to(self.device)
-        advantages = torch.tensor([rollouts['advantages'][i] for i in indices]).to(self.device)
-        returns = torch.tensor([rollouts['returns'][i] for i in indices]).to(self.device)
-        values = torch.tensor([rollouts['values'][i] for i in indices]).to(self.device)
-        rewards = torch.tensor([rollouts['rewards'][i] for i in indices]).to(self.device)
-        
-        # Tokenize for model input
-        full_texts = [f"{q} {r}" for q, r in zip(queries, responses)]
-        inputs = self.model.tokenizer(
-            full_texts,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=self.config.model.max_length
+        input_ids = torch.nn.utils.rnn.pad_sequence(
+            [rollouts['input_ids'][int(i)].squeeze(0) for i in indices], batch_first=True, padding_value=self.model.tokenizer.pad_token_id
         ).to(self.device)
-        
+        attention_mask = torch.nn.utils.rnn.pad_sequence(
+            [rollouts['attention_mask'][int(i)].squeeze(0) for i in indices], batch_first=True, padding_value=0
+        ).to(self.device)
+        # T-1 aligned tensors
+        old_token_logprobs = torch.nn.utils.rnn.pad_sequence(
+            [rollouts['old_token_logprobs'][int(i)] for i in indices], batch_first=True, padding_value=0.0
+        ).to(self.device)
+        advantages_t = torch.nn.utils.rnn.pad_sequence(
+            [rollouts['advantages_t'][int(i)] for i in indices], batch_first=True, padding_value=0.0
+        ).to(self.device)
+        returns_t = torch.nn.utils.rnn.pad_sequence(
+            [rollouts['returns_t'][int(i)] for i in indices], batch_first=True, padding_value=0.0
+        ).to(self.device)
+        gen_mask = torch.nn.utils.rnn.pad_sequence(
+            [rollouts['gen_mask'][int(i)] for i in indices], batch_first=True, padding_value=0
+        ).to(self.device)
+
         return PPOBatch(
             queries=queries,
             responses=responses,
-            old_logprobs=old_logprobs,
-            advantages=advantages,
-            returns=returns,
-            values=values,
-            rewards=rewards,
-            attention_mask=inputs.attention_mask,
-            input_ids=inputs.input_ids
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            gen_mask=gen_mask,
+            old_token_logprobs=old_token_logprobs,
+            advantages_t=advantages_t,
+            returns_t=returns_t,
         )
         
     def _ppo_step(self, batch: PPOBatch) -> PPOStats:
@@ -395,34 +488,41 @@ class PPOTrainer:
             index=batch.input_ids[:, 1:].unsqueeze(-1)
         ).squeeze(-1)
         
-        # Sum log probabilities over sequence length; mask pads
+        # Per-token PPO: restrict to generated region
         attention_mask = batch.attention_mask[:, 1:]
-        current_log_probs = (token_log_probs * attention_mask).sum(dim=-1)
+        eff_mask = attention_mask * batch.gen_mask
+        current_logprobs_t = token_log_probs * eff_mask
+        old_logprobs_t = batch.old_token_logprobs * eff_mask
+        # Ratio per token
+        ratio_t = torch.exp(current_logprobs_t - old_logprobs_t.detach()) * eff_mask
+        # Policy loss per token (clipped)
+        policy_loss_1 = batch.advantages_t * ratio_t
+        policy_loss_2 = batch.advantages_t * torch.clamp(
+            ratio_t, 1 - self.ppo_config.cliprange, 1 + self.ppo_config.cliprange
+        )
+        valid = eff_mask.bool()
+        if valid.any():
+            policy_loss = -torch.mean(torch.where(valid, torch.min(policy_loss_1, policy_loss_2), torch.zeros_like(policy_loss_1)))
+        else:
+            policy_loss = torch.tensor(0.0, device=self.device)
         
-        # Compute values using reward model
-        values = self.reward_model(
+        # Compute values using critic (average over generated tokens)
+        token_values = self.critic(
             input_ids=batch.input_ids,
             attention_mask=batch.attention_mask
-        ).values
-        
-        # Compute ratio; detach old logprobs
-        ratio = torch.exp(current_log_probs - batch.old_logprobs.detach())
-        
-        # Compute policy loss
-        policy_loss_1 = batch.advantages * ratio
-        policy_loss_2 = batch.advantages * torch.clamp(
-            ratio, 1 - self.ppo_config.cliprange, 1 + self.ppo_config.cliprange
-        )
-        policy_loss = -torch.min(policy_loss_1, policy_loss_2).mean()
+        )  # [B, T]
+        vmask = batch.attention_mask * torch.cat([batch.gen_mask[:, :1]*0, batch.gen_mask], dim=1)
+        values = (token_values * vmask).sum(dim=1) / torch.clamp_min(vmask.sum(dim=1), 1)
         
         # Compute value loss
-        value_loss = F.mse_loss(values, batch.returns)
+        returns_seq = (batch.returns_t * eff_mask).sum(dim=1) / torch.clamp_min(eff_mask.sum(dim=1), 1)
+        value_loss = F.mse_loss(values, returns_seq)
         
         # Compute entropy loss
         # Entropy over next-token distribution; average over non-pad tokens
         next_log_probs = log_probs[:, :-1]
         entropy_tok = -(next_log_probs * torch.exp(next_log_probs)).sum(dim=-1)
-        nonpad = batch.attention_mask[:, 1:]
+        nonpad = eff_mask
         entropy = (entropy_tok * nonpad).sum() / torch.clamp_min(nonpad.sum(), 1)
         entropy_loss = -entropy  # We want to maximize entropy
         
@@ -438,53 +538,45 @@ class PPOTrainer:
         logp_ref = ref_log_probs[:, :-1]
         token_kl = torch.exp(logp) * (logp - logp_ref)
         # mask pad of target tokens
-        nonpad = batch.attention_mask[:, 1:].unsqueeze(-1)
+        nonpad = eff_mask.unsqueeze(-1)
         token_kl = token_kl * nonpad
         denom = nonpad.sum()
         kl_div = token_kl.sum() / torch.clamp_min(denom, 1)
         
-        # Total loss
-        total_loss = (
-            policy_loss +
-            self.ppo_config.vf_coef * value_loss +
-            0.01 * entropy_loss +  # Small entropy bonus
-            self.kl_ctl.value * kl_div
-        )
-        
-        # Backward pass
+        # Separate updates: policy (actor) and value (critic)
+        policy_total = policy_loss + 0.01 * entropy_loss + self.kl_ctl.value * kl_div
         self.optimizer.zero_grad()
-        total_loss.backward()
-        
-        # Gradient clipping
-        torch.nn.utils.clip_grad_norm_(
-            self.model.parameters(),
-            self.ppo_config.max_grad_norm
-        )
-        
+        policy_total.backward(retain_graph=False)
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.ppo_config.max_grad_norm)
         self.optimizer.step()
+
+        # Critic update (MSE toward returns)
+        self.value_optimizer.zero_grad()
+        value_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), self.ppo_config.max_grad_norm)
+        self.value_optimizer.step()
         
         # Update KL controller
         self.kl_ctl.update(kl_div.item(), batch.input_ids.size(0))
         
         # Compute statistics
         with torch.no_grad():
-            clipfrac = ((ratio - 1.0).abs() > self.ppo_config.cliprange).float().mean()
-            # guard variance division
-            var_returns = batch.returns.var(unbiased=False)
-            explained_variance = 1 - (batch.returns - values).var(unbiased=False) / torch.clamp_min(var_returns, 1e-8)
-            approx_kl = (batch.old_logprobs - current_log_probs).mean()
+            clipfrac = ((ratio_t[valid] - 1.0).abs() > self.ppo_config.cliprange).float().mean() if valid.any() else torch.tensor(0.0)
+            var_returns = returns_seq.var(unbiased=False)
+            explained_variance = 1 - (returns_seq - values).var(unbiased=False) / torch.clamp_min(var_returns, 1e-8)
+            approx_kl = (old_logprobs_t[valid] - current_logprobs_t[valid]).mean() if valid.any() else torch.tensor(0.0)
             
         return PPOStats(
             policy_loss=policy_loss.item(),
             value_loss=value_loss.item(),
             entropy_loss=entropy_loss.item(),
-            total_loss=total_loss.item(),
+            total_loss=(policy_total + self.ppo_config.vf_coef * value_loss).item(),
             kl_divergence=kl_div.item(),
             clipfrac=clipfrac.item(),
             explained_variance=explained_variance.item(),
             approx_kl=approx_kl.item(),
-            ratio_mean=ratio.mean().item(),
-            ratio_std=ratio.std().item()
+            ratio_mean=(ratio_t[valid].mean().item() if valid.any() else 0.0),
+            ratio_std=(ratio_t[valid].std().item() if valid.any() else 0.0)
         )
         
     def save_checkpoint(self, save_path: str):

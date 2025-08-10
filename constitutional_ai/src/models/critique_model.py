@@ -73,7 +73,7 @@ class CritiqueModel(ConstitutionalAIModel):
         
         critique_text = outputs[0].text.strip()
         
-        # Parse critique components
+        # Parse critique components (heuristic); prefer model-generated structure if present
         critique_output = self._parse_critique(critique_text, principles)
         
         logger.debug(f"Generated critique for {critique_type}: {critique_output.critique[:100]}...")
