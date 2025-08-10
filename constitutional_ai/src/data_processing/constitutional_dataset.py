@@ -170,8 +170,10 @@ class ConstitutionalDataset(Dataset):
             return_tensors="pt"
         )
         
+        # Ensure revised_response has content; if empty, fallback to original to avoid empty labels
+        revised_text = example.revised_response if example.revised_response else example.original_response
         revised_response_tokens = self.tokenizer(
-            example.revised_response,
+            revised_text,
             max_length=self.config.data.max_output_length,
             truncation=True,
             padding="max_length",

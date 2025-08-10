@@ -64,8 +64,8 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 # Install dependencies
 pip install -r requirements.txt
 
-# Install in development mode
-pip install -e .
+# Install in development mode (from repo root)
+pip install -e constitutional_ai
 ```
 
 ### Basic Usage

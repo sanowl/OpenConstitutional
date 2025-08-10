@@ -35,8 +35,9 @@ class BenchmarkEvaluator:
         self.metrics = {
             "bleu": self._compute_bleu_score,
             "rouge": self._compute_rouge_score,
-            "bert_score": self._compute_bert_score,
-            "perplexity": self._compute_perplexity,
+            # NOTE: proxy_* metrics are heuristic proxies, not true implementations.
+            "proxy_bert_score": self._compute_proxy_bert_score,
+            "proxy_perplexity": self._compute_proxy_perplexity,
             "diversity": self._compute_diversity_metrics,
             "coherence": self._compute_coherence_metrics,
             "relevance": self._compute_relevance_metrics
@@ -62,14 +63,13 @@ class BenchmarkEvaluator:
             if metric_name in self.metrics:
                 try:
                     logger.info(f"Computing {metric_name} metric...")
-                    
-                    if metric_name in ["bleu", "rouge", "bert_score"] and references is None:
+                    if metric_name in ["bleu", "rouge"] and references is None:
                         logger.warning(f"Skipping {metric_name} - requires references")
                         continue
                         
                     metric_func = self.metrics[metric_name]
                     
-                    if metric_name in ["bleu", "rouge", "bert_score"]:
+                    if metric_name in ["bleu", "rouge"]:
                         score = metric_func(responses, references)
                     else:
                         score = metric_func(questions, responses)
@@ -229,14 +229,10 @@ class BenchmarkEvaluator:
                     
         return dp[m][n]
         
-    def _compute_bert_score(
+    def _compute_proxy_bert_score(
         self, responses: List[str], references: List[str]
     ) -> Dict[str, float]:
-        """Compute BERTScore (simplified version)."""
-        
-        # This is a simplified version - in practice, you'd use the bert_score library
-        # For now, we'll compute a simple embedding-based similarity
-        
+        """Heuristic proxy for BERTScore using word overlap. For demo only."""
         similarities = []
         
         for response, reference in zip(responses, references):
@@ -259,12 +255,10 @@ class BenchmarkEvaluator:
             "bert_score_f1": np.mean(similarities)
         }
         
-    def _compute_perplexity(
+    def _compute_proxy_perplexity(
         self, questions: List[str], responses: List[str]
     ) -> Dict[str, float]:
-        """Compute perplexity metrics."""
-        
-        # Simplified perplexity computation
+        """Heuristic proxy for perplexity; do not treat as real ppl."""
         perplexities = []
         
         for response in responses:

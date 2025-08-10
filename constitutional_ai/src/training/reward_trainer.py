@@ -13,6 +13,7 @@ from tqdm import tqdm
 import os
 
 from ..models.reward_model import RewardModel
+import torch.nn.functional as F
 from ..data_processing.preference_dataset import PreferenceDataset
 from ..utils.config import Config
 from ..utils.logging import get_logger, MetricsLogger
@@ -233,9 +234,8 @@ class RewardTrainer:
         rejected_outputs = self.reward_model(**rejected_inputs)
         
         # Compute pairwise ranking loss
-        loss = -torch.log(
-            torch.sigmoid(chosen_outputs.rewards - rejected_outputs.rewards)
-        ).mean()
+        margin = chosen_outputs.rewards - rejected_outputs.rewards
+        loss = F.binary_cross_entropy_with_logits(margin, torch.ones_like(margin))
         
         return loss
         

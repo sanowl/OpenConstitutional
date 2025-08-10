@@ -114,6 +114,11 @@ def main():
         config.logging.use_wandb = True
     
     config.logging.output_dir = args.output_dir
+    # Auto-select device if unspecified or invalid
+    if config.model.device not in ("cuda", "cpu"):
+        config.model.device = "cuda" if torch.cuda.is_available() else "cpu"
+    if config.model.device == "cuda" and not torch.cuda.is_available():
+        config.model.device = "cpu"
     config.training.seed = args.seed
     
     # Create output directory

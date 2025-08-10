@@ -7,7 +7,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-import wandb
+try:
+    import wandb  # type: ignore
+except Exception:  # pragma: no cover
+    wandb = None
 
 
 def setup_logging(
@@ -62,6 +65,8 @@ class WandBLogger:
         
     def init(self) -> None:
         """Initialize W&B run."""
+        if wandb is None:
+            return
         self.run = wandb.init(
             project=self.project,
             entity=self.entity,
@@ -73,24 +78,24 @@ class WandBLogger:
         
     def log(self, data: dict, step: Optional[int] = None) -> None:
         """Log data to W&B."""
-        if self.run:
+        if self.run and wandb is not None:
             wandb.log(data, step=step)
             
     def log_artifact(self, artifact_path: str, artifact_type: str, name: str) -> None:
         """Log artifact to W&B."""
-        if self.run:
+        if self.run and wandb is not None:
             artifact = wandb.Artifact(name, type=artifact_type)
             artifact.add_file(artifact_path)
             self.run.log_artifact(artifact)
             
     def finish(self) -> None:
         """Finish W&B run."""
-        if self.run:
+        if self.run and wandb is not None:
             wandb.finish()
             
     def watch(self, model) -> None:
         """Watch model with W&B."""
-        if self.run:
+        if self.run and wandb is not None:
             wandb.watch(model)
 
 

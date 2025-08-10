@@ -4,7 +4,7 @@ setup(
     name="constitutional-ai",
     version="0.1.0",
     description="End-to-end implementation of Constitutional AI methodology",
-    author="san hashim"
+    author="san hashim",
     packages=find_packages(where="src"),
     package_dir={"": "src"},
     python_requires=">=3.8",

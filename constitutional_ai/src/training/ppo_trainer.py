@@ -310,27 +310,29 @@ class PPOTrainer:
             index=inputs.input_ids[:, 1:].unsqueeze(-1)
         ).squeeze(-1)
         
-        # Sum log probabilities over sequence length
+        # Sum log probabilities over sequence length, mask pads
         attention_mask = inputs.attention_mask[:, 1:]
         sequence_log_probs = (token_log_probs * attention_mask).sum(dim=-1)
         
-        # Compute values using reward model
-        values = self.reward_model(**inputs).values
+        # Compute values using reward model (masked mean over non-pad positions)
+        reward_out = self.reward_model(**inputs)
+        values = reward_out.values
         
         return sequence_log_probs, values
         
     def _compute_advantages_and_returns(
-        self, rewards: torch.Tensor, values: torch.Tensor
+        self, rewards: torch.Tensor, values: torch.Tensor, gamma: Optional[float] = None, lam: Optional[float] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Compute advantages and returns using GAE."""
-        
-        # Simple advantage computation (can be enhanced with GAE)
-        returns = rewards  # In the simplest case, returns = rewards
+        """Compute advantages and returns using GAE(lambda) over sequence-level rewards.
+        Note: current pipeline produces one reward/value per query-response pair (no per-timestep rollout),
+        so we fall back to delta-based advantages while keeping normalization.
+        """
+        gamma = self.ppo_config.gamma if gamma is None else gamma
+        lam = self.ppo_config.lam if lam is None else lam
+        # With one-step episodes, GAE reduces to A = r - V(s)
+        returns = rewards
         advantages = returns - values
-        
-        # Normalize advantages
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-        
+        advantages = (advantages - advantages.mean()) / (advantages.std(unbiased=False) + 1e-8)
         return advantages, returns
         
     def _create_mini_batch(
@@ -393,7 +395,7 @@ class PPOTrainer:
             index=batch.input_ids[:, 1:].unsqueeze(-1)
         ).squeeze(-1)
         
-        # Sum log probabilities over sequence length
+        # Sum log probabilities over sequence length; mask pads
         attention_mask = batch.attention_mask[:, 1:]
         current_log_probs = (token_log_probs * attention_mask).sum(dim=-1)
         
@@ -403,8 +405,8 @@ class PPOTrainer:
             attention_mask=batch.attention_mask
         ).values
         
-        # Compute ratio
-        ratio = torch.exp(current_log_probs - batch.old_logprobs)
+        # Compute ratio; detach old logprobs
+        ratio = torch.exp(current_log_probs - batch.old_logprobs.detach())
         
         # Compute policy loss
         policy_loss_1 = batch.advantages * ratio
@@ -417,18 +419,29 @@ class PPOTrainer:
         value_loss = F.mse_loss(values, batch.returns)
         
         # Compute entropy loss
-        entropy = -(log_probs * torch.exp(log_probs)).sum(dim=-1).mean()
+        # Entropy over next-token distribution; average over non-pad tokens
+        next_log_probs = log_probs[:, :-1]
+        entropy_tok = -(next_log_probs * torch.exp(next_log_probs)).sum(dim=-1)
+        nonpad = batch.attention_mask[:, 1:]
+        entropy = (entropy_tok * nonpad).sum() / torch.clamp_min(nonpad.sum(), 1)
         entropy_loss = -entropy  # We want to maximize entropy
         
-        # KL divergence with reference model
+        # KL divergence with reference model (mask padded positions)
         with torch.no_grad():
             ref_outputs = self.ref_model(
                 input_ids=batch.input_ids,
                 attention_mask=batch.attention_mask
             )
             ref_log_probs = F.log_softmax(ref_outputs.logits, dim=-1)
-            
-        kl_div = F.kl_div(log_probs, torch.exp(ref_log_probs), reduction='batchmean', log_target=False)
+        # compute token-wise kl on next-token positions
+        logp = log_probs[:, :-1]
+        logp_ref = ref_log_probs[:, :-1]
+        token_kl = torch.exp(logp) * (logp - logp_ref)
+        # mask pad of target tokens
+        nonpad = batch.attention_mask[:, 1:].unsqueeze(-1)
+        token_kl = token_kl * nonpad
+        denom = nonpad.sum()
+        kl_div = token_kl.sum() / torch.clamp_min(denom, 1)
         
         # Total loss
         total_loss = (
@@ -456,7 +469,9 @@ class PPOTrainer:
         # Compute statistics
         with torch.no_grad():
             clipfrac = ((ratio - 1.0).abs() > self.ppo_config.cliprange).float().mean()
-            explained_variance = 1 - (batch.returns - values).var() / batch.returns.var()
+            # guard variance division
+            var_returns = batch.returns.var(unbiased=False)
+            explained_variance = 1 - (batch.returns - values).var(unbiased=False) / torch.clamp_min(var_returns, 1e-8)
             approx_kl = (batch.old_logprobs - current_log_probs).mean()
             
         return PPOStats(

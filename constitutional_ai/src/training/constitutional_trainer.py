@@ -77,7 +77,7 @@ class ConstitutionalTrainer:
         )
         
         # Setup scheduler
-        total_steps = len(self.train_dataloader) * self.config.training.num_epochs
+        total_steps = max(1, len(self.train_dataloader)) * max(1, self.config.training.num_epochs)
         self.scheduler = get_linear_schedule_with_warmup(
             self.optimizer,
             num_warmup_steps=self.config.training.warmup_steps,
@@ -105,7 +105,7 @@ class ConstitutionalTrainer:
             train_metrics = self._train_epoch()
             
             # Evaluation phase
-            if self.eval_dataloader and epoch % self.config.evaluation.eval_steps == 0:
+            if self.eval_dataloader and (epoch % max(1, self.config.evaluation.eval_steps) == 0):
                 eval_metrics = self._evaluate()
                 
                 # Log metrics
@@ -113,7 +113,7 @@ class ConstitutionalTrainer:
                 self._log_metrics(metrics, epoch)
                 
             # Save checkpoint
-            if epoch % self.config.training.save_steps == 0:
+            if epoch % max(1, self.config.training.save_steps) == 0:
                 self._save_checkpoint(epoch)
                 
         logger.info("Training completed")

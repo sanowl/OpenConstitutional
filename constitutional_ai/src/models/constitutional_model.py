@@ -3,6 +3,7 @@
 import torch
 import torch.nn as nn
 from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
+import warnings
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass
 
@@ -32,11 +33,18 @@ class ConstitutionalAIModel(nn.Module):
         
         # Load tokenizer and model
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+        # Resolve dtype safely for the selected device
+        requested_dtype_name = getattr(config.model, "dtype", "float32")
+        requested_dtype = getattr(torch, requested_dtype_name, torch.float32)
+        if self.device == "cpu" and requested_dtype in (torch.float16, torch.bfloat16):
+            warnings.warn(
+                f"Requested dtype {requested_dtype_name} is not ideal on CPU; falling back to float32.")
+            requested_dtype = torch.float32
         self.model = AutoModelForCausalLM.from_pretrained(
             self.model_name,
-            torch_dtype=getattr(torch, config.model.dtype),
-            device_map="auto" if config.model.device == "cuda" else None
+            torch_dtype=requested_dtype,
         )
+        self.model.to(self.device)
         
         # Add special tokens if needed
         if self.tokenizer.pad_token is None:

@@ -36,12 +36,10 @@ class RewardModel(nn.Module):
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
             
-        # Reward head
+        # Reward and value heads
         self.reward_head = nn.Linear(self.base_model.config.hidden_size, 1)
-        self.dropout = nn.Dropout(0.1)
-        
-        # Value head for PPO
         self.value_head = nn.Linear(self.base_model.config.hidden_size, 1)
+        self.dropout = nn.Dropout(0.1)
         
         logger.info(f"Initialized RewardModel with {self.model_name}")
         
@@ -99,7 +97,10 @@ class RewardModel(nn.Module):
         )
         
         # Move to device
-        device = next(self.parameters()).device if any(self.parameters()) else torch.device('cpu')
+        try:
+            device = next(self.parameters()).device
+        except StopIteration:
+            device = torch.device('cpu')
         inputs = {k: v.to(device) for k, v in inputs.items()}
         
         # Forward pass
