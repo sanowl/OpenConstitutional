@@ -154,7 +154,7 @@ class Phase2Trainer:
                 top_p=0.9,
                 do_sample=True,
                 num_return_sequences=1,
-                max_length=self.config.model.max_length
+                max_new_tokens=128
             )[0].text
             response_b = self.policy_model.generate(
                 prompt=question,
@@ -162,7 +162,7 @@ class Phase2Trainer:
                 top_p=0.7,
                 do_sample=True,
                 num_return_sequences=1,
-                max_length=self.config.model.max_length
+                max_new_tokens=128
             )[0].text
             if response_b.strip() == response_a.strip():
                 # simple perturbation: tweak temperature
@@ -172,7 +172,7 @@ class Phase2Trainer:
                     top_p=0.9,
                     do_sample=True,
                     num_return_sequences=1,
-                    max_length=self.config.model.max_length
+                    max_new_tokens=128
                 )[0].text
             
             response_pairs.append((response_a, response_b))

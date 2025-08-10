@@ -109,6 +109,7 @@ class PreferenceDataset(Dataset):
         )
         
         return {
+            # Raw strings to support cross-encoder
             "question": example.question,
             "chosen_response": example.chosen_response,
             "rejected_response": example.rejected_response,
@@ -333,6 +334,17 @@ class PreferenceDataset(Dataset):
     def get_statistics(self) -> Dict[str, Any]:
         """Get dataset statistics."""
         
+        total = len(self.examples)
+        if total == 0:
+            return {
+                "total_examples": 0,
+                "avg_confidence": 0.0,
+                "confidence_distribution": {},
+                "principles_coverage": {},
+                "question_length_stats": {},
+                "response_length_stats": {},
+            }
+
         stats = {
             "total_examples": len(self.examples),
             "avg_confidence": sum(ex.confidence for ex in self.examples) / len(self.examples),

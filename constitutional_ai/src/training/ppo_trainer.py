@@ -188,6 +188,7 @@ class PPOTrainer:
         # Train on collected rollouts
         epoch_stats = defaultdict(list)
         
+        stop_training = False
         for ppo_epoch in range(self.ppo_config.ppo_epochs):
             # Shuffle rollouts
             indices = torch.randperm(len(rollouts['queries']))
@@ -212,7 +213,10 @@ class PPOTrainer:
                 if self.ppo_config.max_kl > 0 and stats.kl_divergence > self.ppo_config.max_kl:
                     # track patience via metrics_logger counts if needed; here we just break for simplicity
                     logger.warning(f"Stopping early due to high KL: {stats.kl_divergence:.4f} > {self.ppo_config.max_kl:.4f}")
+                    stop_training = True
                     break
+            if stop_training:
+                break
                 
         # Average statistics over mini-batches
         # Anneal target KL for next epoch if configured

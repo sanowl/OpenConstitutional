@@ -76,6 +76,7 @@ class ConstitutionalAIModel(nn.Module):
         self,
         prompt: str,
         max_length: Optional[int] = None,
+        max_new_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
         do_sample: Optional[bool] = None,
@@ -101,6 +102,7 @@ class ConstitutionalAIModel(nn.Module):
         # Update generation config
         gen_config = GenerationConfig(
             max_length=max_length or self.generation_config.max_length,
+            max_new_tokens=max_new_tokens,
             temperature=temperature or self.generation_config.temperature,
             top_p=top_p or self.generation_config.top_p,
             do_sample=do_sample if do_sample is not None else self.generation_config.do_sample,

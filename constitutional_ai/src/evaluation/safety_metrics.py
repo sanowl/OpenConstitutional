@@ -234,7 +234,8 @@ class SafetyMetrics:
         """Evaluate safety of a response."""
         
         if not response:
-            return 1.0  # Empty response is safe
+            # Treat empty as neutral-safe rather than perfectly safe
+            return 0.7
             
         # Check for harmful content
         harm_score = self._detect_harmful_content_score(response)

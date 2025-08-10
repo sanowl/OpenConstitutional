@@ -18,6 +18,7 @@ import torch.nn.functional as F
 from ..data_processing.preference_dataset import PreferenceDataset
 from ..utils.config import Config
 from ..utils.logging import get_logger, MetricsLogger
+from scipy.stats import spearmanr
 
 logger = get_logger(__name__)
 
@@ -91,7 +92,8 @@ class RewardTrainer:
             "train_losses": [],
             "eval_losses": [],
             "accuracies": [],
-            "learning_rates": []
+            "learning_rates": [],
+            "per_principle_margins_mean": {"helpfulness": [], "harmlessness": [], "honesty": []},
         }
         
         for epoch in range(num_epochs):
@@ -101,7 +103,7 @@ class RewardTrainer:
             train_loss = self._train_epoch(train_dataloader)
             training_stats["train_losses"].append(train_loss)
             
-            # Evaluation phase
+            # Evaluation phase and support metrics
             if eval_dataloader:
                 eval_loss, accuracy = self._evaluate_epoch(eval_dataloader)
                 training_stats["eval_losses"].append(eval_loss)
@@ -198,6 +200,8 @@ class RewardTrainer:
         total_loss = 0.0
         correct_predictions = 0
         total_predictions = 0
+        # Aggregate per-principle margins if available
+        per_principle_margins = {"helpfulness": [], "harmlessness": [], "honesty": []}
         
         with torch.no_grad():
             for batch in tqdm(dataloader, desc=f"Evaluating Epoch {self.epoch}"):
@@ -213,9 +217,30 @@ class RewardTrainer:
                 accuracy_batch = self._compute_accuracy(batch)
                 correct_predictions += accuracy_batch * batch["chosen_input_ids"].size(0)
                 total_predictions += batch["chosen_input_ids"].size(0)
+
+                # Per-principle margins for separate-encoder path
+                if not isinstance(self.reward_model, CrossEncoderRewardModel):
+                    chosen_inputs = {
+                        "input_ids": batch["chosen_input_ids"],
+                        "attention_mask": batch["chosen_attention_mask"]
+                    }
+                    rejected_inputs = {
+                        "input_ids": batch["rejected_input_ids"],
+                        "attention_mask": batch["rejected_attention_mask"]
+                    }
+                    out_c = self.reward_model(**chosen_inputs)
+                    out_r = self.reward_model(**rejected_inputs)
+                    for key, tensor in ("helpfulness", out_c.helpfulness), ("harmlessness", out_c.harmlessness), ("honesty", out_c.honesty):
+                        if tensor is not None:
+                            margin = (tensor - getattr(out_r, key)).detach().cpu().tolist()
+                            per_principle_margins[key].extend(margin)
                 
         avg_loss = total_loss / len(dataloader)
         accuracy = correct_predictions / total_predictions if total_predictions > 0 else 0.0
+        # Log mean per-principle margins if collected
+        for key, arr in per_principle_margins.items():
+            if arr:
+                self.metrics_logger.log_metric(f"eval_margin_{key}_mean", float(np.mean(arr)), self.step)
         
         return avg_loss, accuracy
         
@@ -223,12 +248,14 @@ class RewardTrainer:
         """Compute pairwise ranking loss."""
         # Cross-encoder path
         if isinstance(self.reward_model, CrossEncoderRewardModel):
-            # Build texts from token ids is non-trivial; trainer expects raw text in dataset for cross-encoder mode.
-            # For simplicity, approximate reconstruction via tokenizer decode; better to wire raw text in dataset.
-            tok = self.reward_model.tokenizer
-            questions = [tok.decode(q_ids, skip_special_tokens=True) for q_ids in batch.get("question_input_ids", batch["chosen_input_ids"])[:]]
-            responses_a = [tok.decode(ids, skip_special_tokens=True) for ids in batch["chosen_input_ids"]]
-            responses_b = [tok.decode(ids, skip_special_tokens=True) for ids in batch["rejected_input_ids"]]
+            # Use raw strings provided by PreferenceDataset
+            questions = batch.get("question")
+            if questions is None:
+                raise ValueError("PreferenceDataset batch missing 'question' strings needed for cross-encoder.")
+            responses_a = batch.get("chosen_response")
+            responses_b = batch.get("rejected_response")
+            if responses_a is None or responses_b is None:
+                raise ValueError("PreferenceDataset batch missing response strings for cross-encoder.")
             labels = torch.ones(len(responses_a), device=self.device)
             loss = self.reward_model.compute_pairwise_loss(questions, responses_a, responses_b, labels)
             return loss
@@ -250,27 +277,32 @@ class RewardTrainer:
         
     def _compute_accuracy(self, batch: Dict[str, Any]) -> float:
         """Compute accuracy of preference predictions."""
-        
-        # Get chosen and rejected responses
+        # Cross-encoder path
+        if isinstance(self.reward_model, CrossEncoderRewardModel):
+            questions = batch.get("question")
+            responses_a = batch.get("chosen_response")
+            responses_b = batch.get("rejected_response")
+            if questions is None or responses_a is None or responses_b is None:
+                raise ValueError("PreferenceDataset batch missing required string fields for cross-encoder accuracy computation.")
+            logits = self.reward_model.forward(questions, responses_a, responses_b).margin_logits
+            preds = (logits > 0).float()
+            # Label is 1 for chosen preferred (A)
+            labels = torch.ones_like(preds)
+            return (preds == labels).float().mean().item()
+
+        # Separate-encoder path
         chosen_inputs = {
             "input_ids": batch["chosen_input_ids"],
             "attention_mask": batch["chosen_attention_mask"]
         }
-        
         rejected_inputs = {
             "input_ids": batch["rejected_input_ids"],
             "attention_mask": batch["rejected_attention_mask"]
         }
-        
-        # Forward pass through reward model
         chosen_outputs = self.reward_model(**chosen_inputs)
         rejected_outputs = self.reward_model(**rejected_inputs)
-        
-        # Compute accuracy (chosen should have higher reward)
         correct = (chosen_outputs.rewards > rejected_outputs.rewards).float()
-        accuracy = correct.mean().item()
-        
-        return accuracy
+        return correct.mean().item()
         
     def _save_checkpoint(self, epoch: int):
         """Save training checkpoint."""
@@ -294,21 +326,80 @@ class RewardTrainer:
         
         logger.info(f"Reward model checkpoint saved to {checkpoint_dir}")
         
-    def evaluate(self, eval_dataset: Any) -> Dict[str, float]:
-        """Evaluate reward model on dataset."""
-        
-        # This is a placeholder for more comprehensive evaluation
-        # In practice, you would evaluate on validation preferences
-        
+    def evaluate(self, eval_dataset: PreferenceDataset) -> Dict[str, float]:
+        """Evaluate reward model on a validation preference dataset with support metrics."""
         logger.info("Evaluating reward model")
-        
-        # Basic evaluation metrics
-        eval_metrics = {
+        dataloader = DataLoader(
+            eval_dataset,
+            batch_size=self.config.training.batch_size,
+            shuffle=False,
+            num_workers=self.config.data.num_workers,
+            pin_memory=True,
+        )
+
+        self.reward_model.eval()
+        all_margins: List[float] = []
+        all_conf: List[float] = []
+        correct = 0
+        total = 0
+        per_principle_margins = {"helpfulness": [], "harmlessness": [], "honesty": []}
+
+        with torch.no_grad():
+            for batch in tqdm(dataloader, desc="Evaluating RewardModel"):
+                batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+
+                if isinstance(self.reward_model, CrossEncoderRewardModel):
+                    questions = batch.get("question")
+                    responses_a = batch.get("chosen_response")
+                    responses_b = batch.get("rejected_response")
+                    logits = self.reward_model.forward(questions, responses_a, responses_b).margin_logits
+                    margins = logits.detach().cpu().tolist()
+                else:
+                    chosen_inputs = {"input_ids": batch["chosen_input_ids"], "attention_mask": batch["chosen_attention_mask"]}
+                    rejected_inputs = {"input_ids": batch["rejected_input_ids"], "attention_mask": batch["rejected_attention_mask"]}
+                    out_c = self.reward_model(**chosen_inputs)
+                    out_r = self.reward_model(**rejected_inputs)
+                    margins = (out_c.rewards - out_r.rewards).detach().cpu().tolist()
+                    # collect per-principle margins if exposed
+                    for key, tensor in ("helpfulness", out_c.helpfulness), ("harmlessness", out_c.harmlessness), ("honesty", out_c.honesty):
+                        if tensor is not None:
+                            per_principle_margins[key].extend((tensor - getattr(out_r, key)).detach().cpu().tolist())
+
+                all_margins.extend(margins)
+                # chosen preferred label is 1, so correct when margin>0
+                preds = (torch.tensor(margins) > 0).float()
+                correct += preds.sum().item()
+                total += preds.numel()
+                # confidence correlation support
+                conf = batch.get("confidence")
+                if isinstance(conf, torch.Tensor):
+                    all_conf.extend(conf.detach().cpu().tolist())
+
+        accuracy = float(correct / total) if total else 0.0
+        mean_margin = float(np.mean(all_margins)) if all_margins else 0.0
+        std_margin = float(np.std(all_margins)) if all_margins else 0.0
+        # Spearman correlation between margins and provided confidences (if any)
+        if all_margins and all_conf and len(all_margins) == len(all_conf) and len(all_margins) > 1:
+            try:
+                spearman = spearmanr(all_margins, all_conf).correlation
+                spearman = float(spearman) if spearman is not None else None
+            except Exception:
+                spearman = None
+        else:
+            spearman = None
+
+        metrics: Dict[str, Any] = {
             "model_parameters": sum(p.numel() for p in self.reward_model.parameters()),
-            "trainable_parameters": sum(p.numel() for p in self.reward_model.parameters() if p.requires_grad)
+            "trainable_parameters": sum(p.numel() for p in self.reward_model.parameters() if p.requires_grad),
+            "accuracy": accuracy,
+            "mean_margin": mean_margin,
+            "std_margin": std_margin,
+            "spearman_margin_confidence": spearman,
         }
-        
-        # Add more sophisticated evaluation metrics here
-        # such as correlation with human preferences, calibration, etc.
-        
-        return eval_metrics
+        # Per-principle margin means when available
+        for key, arr in per_principle_margins.items():
+            if arr:
+                metrics[f"mean_margin_{key}"] = float(np.mean(arr))
+
+        logger.info(f"Reward eval: acc={accuracy:.4f}, margin={mean_margin:.4f}±{std_margin:.4f}")
+        return metrics
