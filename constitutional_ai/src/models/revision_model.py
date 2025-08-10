@@ -69,19 +69,28 @@ class RevisionModel(ConstitutionalAIModel):
                 critique=critique
             )
             
-        # Generate revision
+        # Generate revision aiming for JSON output
         outputs = self.generate(
             prompt=prompt,
             temperature=temperature or self.revision_temperature,
             max_length=self.config.model.max_length,
+            do_sample=True,
             num_return_sequences=1,
             return_full_text=False
         )
-        
         revised_text = outputs[0].text.strip()
         
-        # Parse revision components
-        revision_output = self._parse_revision(revised_text, original_response)
+        # Try to parse JSON first, fallback to heuristic
+        parsed = self._parse_json_revision(revised_text)
+        if parsed is not None:
+            revision_output = RevisionOutput(
+                revised_response=parsed.get("revised", original_response),
+                improvements=parsed.get("improvements", []),
+                quality_score=float(parsed.get("quality", 0.5)),
+                original_response=original_response
+            )
+        else:
+            revision_output = self._parse_revision(revised_text, original_response)
         
         logger.debug(f"Generated revision for {revision_type}: {revision_output.revised_response[:100]}...")
         
@@ -224,6 +233,22 @@ class RevisionModel(ConstitutionalAIModel):
                 metrics["quality_error"] = quality_error
                 
         return metrics
+
+    def _parse_json_revision(self, text: str) -> Optional[Dict[str, Any]]:
+        """Attempt to parse a compact JSON revision."""
+        import json
+        start = text.find('{')
+        end = text.rfind('}')
+        if start == -1 or end == -1 or end <= start:
+            return None
+        candidate = text[start:end+1]
+        try:
+            obj = json.loads(candidate)
+            if isinstance(obj, dict):
+                return obj
+        except Exception:
+            return None
+        return None
         
     def compare_revisions(
         self,

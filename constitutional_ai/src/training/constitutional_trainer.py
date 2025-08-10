@@ -311,20 +311,41 @@ class ConstitutionalTrainer:
         logger.info("Generating critiques and revisions")
         
         questions, responses = dataset.get_questions_and_responses()
+        use_cache = bool(getattr(self.config.training, "cache_critiques_revisions", True))
+        cache_dir = os.path.join(self.config.training.cache_dir, f"{self.config.model.model_name.replace('/', '_')}")
+        os.makedirs(cache_dir, exist_ok=True)
         
         # Generate critiques
         critiques = []
-        for question, response in tqdm(zip(questions, responses), desc="Generating critiques"):
+        for idx, (question, response) in enumerate(tqdm(list(zip(questions, responses)), desc="Generating critiques")):
+            cache_path = os.path.join(cache_dir, f"critique_{idx}.json")
+            if use_cache and os.path.exists(cache_path):
+                import json
+                with open(cache_path, 'r') as f:
+                    data = json.load(f)
+                critiques.append(data.get("critique", ""))
+                continue
             critique_output = self.critique_model.generate_critique(
                 question=question,
                 response=response,
                 critique_type="constitutional"
             )
             critiques.append(critique_output.critique)
+            if use_cache:
+                import json
+                with open(cache_path, 'w') as f:
+                    json.dump({"critique": critique_output.critique}, f)
             
         # Generate revisions
         revisions = []
-        for question, response, critique in tqdm(zip(questions, responses, critiques), desc="Generating revisions"):
+        for idx, (question, response, critique) in enumerate(tqdm(list(zip(questions, responses, critiques)), desc="Generating revisions")):
+            cache_path = os.path.join(cache_dir, f"revision_{idx}.json")
+            if use_cache and os.path.exists(cache_path):
+                import json
+                with open(cache_path, 'r') as f:
+                    data = json.load(f)
+                revisions.append(data.get("revised_response", ""))
+                continue
             revision_output = self.revision_model.generate_revision(
                 question=question,
                 original_response=response,
@@ -332,6 +353,10 @@ class ConstitutionalTrainer:
                 revision_type="constitutional"
             )
             revisions.append(revision_output.revised_response)
+            if use_cache:
+                import json
+                with open(cache_path, 'w') as f:
+                    json.dump({"revised_response": revision_output.revised_response}, f)
             
         # Add to dataset
         dataset.add_critiques_and_revisions(critiques, revisions)

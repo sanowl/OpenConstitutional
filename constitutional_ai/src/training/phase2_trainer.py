@@ -17,6 +17,7 @@ from .reward_trainer import RewardTrainer
 from ..models.constitutional_model import ConstitutionalAIModel
 from ..models.preference_model import PreferenceModel
 from ..models.reward_model import RewardModel
+from ..models.reward_cross_encoder import CrossEncoderRewardModel
 from ..data_processing.constitutional_dataset import ConstitutionalDataset
 from ..data_processing.preference_dataset import PreferenceDataset
 from ..utils.config import Config
@@ -46,8 +47,11 @@ class Phase2Trainer:
         # Initialize preference model for collecting AI feedback
         self.preference_model = PreferenceModel(config).to(self.device)
         
-        # Initialize reward model
-        self.reward_model = RewardModel(config).to(self.device)
+        # Initialize reward model (cross-encoder optional)
+        if getattr(config.training, "use_cross_encoder_reward", False):
+            self.reward_model = CrossEncoderRewardModel(config).to(self.device)
+        else:
+            self.reward_model = RewardModel(config).to(self.device)
         
         # Initialize sub-trainers
         self.reward_trainer = RewardTrainer(self.reward_model, config)
@@ -149,14 +153,16 @@ class Phase2Trainer:
                 temperature=0.7,
                 top_p=0.9,
                 do_sample=True,
-                num_return_sequences=1
+                num_return_sequences=1,
+                max_length=self.config.model.max_length
             )[0].text
             response_b = self.policy_model.generate(
                 prompt=question,
                 temperature=1.0,
                 top_p=0.7,
                 do_sample=True,
-                num_return_sequences=1
+                num_return_sequences=1,
+                max_length=self.config.model.max_length
             )[0].text
             if response_b.strip() == response_a.strip():
                 # simple perturbation: tweak temperature
@@ -165,7 +171,8 @@ class Phase2Trainer:
                     temperature=1.2,
                     top_p=0.9,
                     do_sample=True,
-                    num_return_sequences=1
+                    num_return_sequences=1,
+                    max_length=self.config.model.max_length
                 )[0].text
             
             response_pairs.append((response_a, response_b))
@@ -179,9 +186,7 @@ class Phase2Trainer:
         )
         
         # Create preference dataset
-        preference_dataset = PreferenceDataset(
-            preference_data, self.reward_model.tokenizer
-        )
+        preference_dataset = PreferenceDataset(preference_data, self.reward_model.tokenizer)
         
         # Save preference data
         self._save_preference_data(preference_data)

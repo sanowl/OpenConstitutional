@@ -6,6 +6,7 @@ from .revision_model import RevisionModel
 from .preference_model import PreferenceModel
 from .reward_model import RewardModel
 from .critic_model import CriticModel
+from .reward_cross_encoder import CrossEncoderRewardModel
 
 __all__ = [
     "ConstitutionalAIModel",
@@ -14,4 +15,5 @@ __all__ = [
     "PreferenceModel",
     "RewardModel",
     "CriticModel",
+    "CrossEncoderRewardModel",
 ]

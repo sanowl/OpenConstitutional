@@ -76,26 +76,30 @@ class HHRLHFProcessor:
             return None
             
     def _extract_question(self, conversation: str) -> str:
-        """Extract human question from conversation."""
-        
-        lines = conversation.split('\n')
+        """Extract first human turn as question, supporting multi-turn."""
+        lines = [l.strip() for l in conversation.split('\n') if l.strip()]
+        # Prefer the first Human: line
         for line in lines:
-            if line.strip().startswith("Human:"):
-                return line.replace("Human:", "").strip()
-                
-        # Fallback: take first 200 characters
-        return conversation[:200].strip()
+            if line.lower().startswith("human:"):
+                return line.split(":", 1)[1].strip()
+        # Fallback to first non-empty line
+        return lines[0] if lines else conversation[:200].strip()
         
     def _extract_response(self, conversation: str) -> str:
-        """Extract assistant response from conversation."""
-        
-        lines = conversation.split('\n')
+        """Extract the first assistant turn following a human turn."""
+        lines = [l.strip() for l in conversation.split('\n') if l.strip()]
+        for i, line in enumerate(lines):
+            if line.lower().startswith("human:"):
+                # Look ahead for the next assistant line
+                for j in range(i + 1, len(lines)):
+                    if lines[j].lower().startswith("assistant:"):
+                        return lines[j].split(":", 1)[1].strip()
+                break
+        # Fallback to first Assistant line anywhere
         for line in lines:
-            if line.strip().startswith("Assistant:"):
-                return line.replace("Assistant:", "").strip()
-                
-        # Fallback: take everything after first 200 characters
-        return conversation[200:].strip()
+            if line.lower().startswith("assistant:"):
+                return line.split(":", 1)[1].strip()
+        return ""
         
     def _create_dummy_examples(self) -> List[HHRLHFExample]:
         """Create dummy examples when dataset loading fails."""

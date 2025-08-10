@@ -21,6 +21,7 @@ from ..models.preference_model import PreferenceModel
 from ..models.reward_model import RewardModel
 from ..utils.config import Config
 from ..utils.logging import get_logger
+from scipy.stats import kendalltau, spearmanr
 
 logger = get_logger(__name__)
 
@@ -558,6 +559,75 @@ class ConstitutionalEvaluator:
         }
         
         return comparison
+
+    def calibrate_reward_with_human(
+        self,
+        reward_model: RewardModel,
+        comparisons: List[Dict[str, Any]],
+        questions_key: str = "question",
+        a_key: str = "response_a",
+        b_key: str = "response_b",
+        pref_key: str = "preference"
+    ) -> Dict[str, Any]:
+        """Calibrate reward model preferences against human comparisons.
+        comparisons: list of dicts with keys: question, response_a, response_b, preference in {"A","B","TIE"}
+        Returns win-rate and Kendall/Spearman correlations on pairwise margins.
+        """
+        if not comparisons:
+            return {"error": "no comparisons"}
+
+        model_choices = []  # 1 if model agrees with human, 0 otherwise (ties count as 0.5)
+        margins = []
+        human_order = []  # +1 if A>B, -1 if B>A, 0 if tie
+
+        for item in comparisons:
+            q = item[questions_key]
+            a = item[a_key]
+            b = item[b_key]
+            pref = str(item[pref_key]).upper()
+
+            # Model rewards
+            with torch.no_grad():
+                r_a = reward_model.compute_reward([f"{q} {a}"])[0].item()
+                r_b = reward_model.compute_reward([f"{q} {b}"])[0].item()
+            margin = r_a - r_b
+            margins.append(margin)
+
+            # Human order encoding
+            if pref == "A":
+                human = 1
+            elif pref == "B":
+                human = -1
+            else:
+                human = 0
+            human_order.append(human)
+
+            # Agreement metric
+            if human == 0:
+                model_choices.append(0.5)  # neutral credit for tie
+            else:
+                model_pred = 1 if margin > 0 else -1 if margin < 0 else 0
+                model_choices.append(1.0 if model_pred == human else 0.0)
+
+        # Win-rate against human
+        win_rate = float(sum(model_choices) / len(model_choices))
+
+        # Rank/correlation on margins vs human order (ties reduce signal)
+        try:
+            ktau = kendalltau(margins, human_order).correlation
+        except Exception:
+            ktau = None
+        try:
+            spr = spearmanr(margins, human_order).correlation
+        except Exception:
+            spr = None
+
+        return {
+            "n": len(margins),
+            "win_rate": win_rate,
+            "kendall_tau": float(ktau) if ktau is not None else None,
+            "spearman_r": float(spr) if spr is not None else None,
+        }
         
     def _compute_model_comparison(
         self, results1: Dict[str, Any], results2: Dict[str, Any]

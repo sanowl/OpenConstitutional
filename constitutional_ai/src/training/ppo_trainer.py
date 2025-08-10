@@ -208,8 +208,16 @@ class PPOTrainer:
                     epoch_stats[key].append(value)
                     
                 self.step += 1
+                # Early stopping on excessive KL if configured
+                if self.ppo_config.max_kl > 0 and stats.kl_divergence > self.ppo_config.max_kl:
+                    # track patience via metrics_logger counts if needed; here we just break for simplicity
+                    logger.warning(f"Stopping early due to high KL: {stats.kl_divergence:.4f} > {self.ppo_config.max_kl:.4f}")
+                    break
                 
         # Average statistics over mini-batches
+        # Anneal target KL for next epoch if configured
+        if self.ppo_config.anneal_target_kl_factor != 1.0:
+            self.kl_ctl.target_kl *= self.ppo_config.anneal_target_kl_factor
         return {key: np.mean(values) for key, values in epoch_stats.items()}
         
     def _collect_rollouts(self, queries: List[str], batch_size: int) -> Dict[str, List]:
@@ -258,14 +266,21 @@ class PPOTrainer:
                 # Sequence-level reward from reward model
                 with torch.no_grad():
                     rewards_seq = self._compute_rewards(batch_queries, responses).float()  # [B]
-                # Per-token rewards: terminal-only shaping at last generated token
+                # Per-token rewards: shaping strategy
                 rewards_t = torch.zeros_like(gen_mask, dtype=torch.float32)
-                for i in range(B):
-                    # last generated index where gen_mask is 1
-                    gen_positions = (gen_mask[i] > 0).nonzero(as_tuple=False)
-                    if gen_positions.numel() > 0:
-                        last_idx = int(gen_positions[-1].item())
-                        rewards_t[i, last_idx] = rewards_seq[i]
+                if self.ppo_config.per_token_shaping == "uniform":
+                    # spread reward uniformly over generated tokens
+                    for bi in range(B):
+                        gen_positions = (gen_mask[bi] > 0).nonzero(as_tuple=False).squeeze(-1)
+                        if gen_positions.numel() > 0:
+                            rewards_t[bi, gen_positions] = rewards_seq[bi] / float(gen_positions.numel())
+                else:
+                    # terminal-only shaping at last generated token
+                    for bi in range(B):
+                        gen_positions = (gen_mask[bi] > 0).nonzero(as_tuple=False)
+                        if gen_positions.numel() > 0:
+                            last_idx = int(gen_positions[-1].item())
+                            rewards_t[bi, last_idx] = rewards_seq[bi]
                 
                 # Values from critic per-token (aligned to next-token predictions)
                 with torch.no_grad():
@@ -468,10 +483,10 @@ class PPOTrainer:
         
     def _ppo_step(self, batch: PPOBatch) -> PPOStats:
         """Perform one PPO update step."""
-        
         self.model.train()
         
         # Forward pass
+        # Optional BF16 mixed precision (placeholder; full AMP integration with Accelerate recommended)
         outputs = self.model(
             input_ids=batch.input_ids,
             attention_mask=batch.attention_mask
@@ -558,6 +573,14 @@ class PPOTrainer:
         
         # Update KL controller
         self.kl_ctl.update(kl_div.item(), batch.input_ids.size(0))
+        # Optionally refresh reference model weights periodically
+        if self.ppo_config.ref_refresh_interval and (self.step % self.ppo_config.ref_refresh_interval == 0):
+            try:
+                self.ref_model.load_state_dict(self.model.state_dict())
+                self.ref_model.eval()
+                logger.info("Refreshed reference model weights")
+            except Exception:
+                logger.warning("Failed to refresh reference model; continuing with existing reference")
         
         # Compute statistics
         with torch.no_grad():

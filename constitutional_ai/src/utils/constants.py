@@ -14,7 +14,8 @@ CONSTITUTIONAL_PRINCIPLES = [
 ]
 
 CRITIQUE_TEMPLATES = {
-    "helpfulness": """Please critique the following response for helpfulness:
+    "helpfulness": """You are a constitutional critic.
+Return a compact JSON object with keys: critique (string), violations (string[]), severity (float in [0,1]), suggestions (string[]).
 
 Question: {question}
 Response: {response}
@@ -25,9 +26,10 @@ Consider whether the response:
 - Is complete and thorough
 - Could be improved in any way
 
-Critique:""",
+JSON:""",
     
-    "harmlessness": """Please critique the following response for harmlessness:
+    "harmlessness": """You are a constitutional critic.
+Return a compact JSON object with keys: critique (string), violations (string[]), severity (float in [0,1]), suggestions (string[]).
 
 Question: {question}
 Response: {response}
@@ -38,9 +40,10 @@ Consider whether the response:
 - Protects user privacy and safety
 - Avoids potentially harmful advice
 
-Critique:""",
+JSON:""",
     
-    "honesty": """Please critique the following response for honesty:
+    "honesty": """You are a constitutional critic.
+Return a compact JSON object with keys: critique (string), violations (string[]), severity (float in [0,1]), suggestions (string[]).
 
 Question: {question}
 Response: {response}
@@ -51,9 +54,10 @@ Consider whether the response:
 - Doesn't make false or misleading claims
 - Cites sources when needed
 
-Critique:""",
+JSON:""",
     
-    "constitutional": """Please critique the following response according to constitutional principles:
+    "constitutional": """You are a constitutional critic.
+Return a compact JSON object with keys: critique (string), violations (string[]), severity (float in [0,1]), suggestions (string[]).
 
 Question: {question}
 Response: {response}
@@ -61,13 +65,14 @@ Response: {response}
 Constitutional Principles:
 {principles}
 
-Evaluate how well the response adheres to these principles and identify any violations:
+Evaluate how well the response adheres to these principles and identify any violations.
 
-Critique:"""
+JSON:"""
 }
 
 REVISION_TEMPLATES = {
-    "helpfulness": """Please revise the following response to be more helpful:
+    "helpfulness": """You are a constitutional reviser.
+Return a compact JSON object with keys: revised (string), improvements (string[]), quality (float in [0,1]).
 
 Question: {question}
 Original Response: {response}
@@ -75,9 +80,10 @@ Critique: {critique}
 
 Please provide a revised response that addresses the critique and is more helpful:
 
-Revised Response:""",
+JSON:""",
     
-    "harmlessness": """Please revise the following response to be more harmless:
+    "harmlessness": """You are a constitutional reviser.
+Return a compact JSON object with keys: revised (string), improvements (string[]), quality (float in [0,1]).
 
 Question: {question}
 Original Response: {response}
@@ -85,9 +91,10 @@ Critique: {critique}
 
 Please provide a revised response that addresses the critique and is more harmless:
 
-Revised Response:""",
+JSON:""",
     
-    "honesty": """Please revise the following response to be more honest:
+    "honesty": """You are a constitutional reviser.
+Return a compact JSON object with keys: revised (string), improvements (string[]), quality (float in [0,1]).
 
 Question: {question}
 Original Response: {response}
@@ -95,9 +102,10 @@ Critique: {critique}
 
 Please provide a revised response that addresses the critique and is more honest:
 
-Revised Response:""",
+JSON:""",
     
-    "constitutional": """Please revise the following response to better align with constitutional principles:
+    "constitutional": """You are a constitutional reviser.
+Return a compact JSON object with keys: revised (string), improvements (string[]), quality (float in [0,1]).
 
 Question: {question}
 Original Response: {response}
@@ -108,11 +116,12 @@ Constitutional Principles:
 
 Please provide a revised response that addresses the critique and better follows the constitutional principles:
 
-Revised Response:"""
+JSON:"""
 }
 
 PREFERENCE_TEMPLATES = {
-    "comparison": """Compare the following two responses and choose which one better follows constitutional principles:
+    "comparison": """You are a constitutional judge.
+Return a compact JSON object with keys: preferred ("A"|"B"), reasoning (string), confidence (float in [0,1]), criteria_scores (object with numeric fields).
 
 Question: {question}
 
@@ -123,7 +132,13 @@ Response B: {response_b}
 Constitutional Principles:
 {principles}
 
-Which response better follows the constitutional principles? Please explain your reasoning.
+Which response better follows the constitutional principles? Explain briefly.
 
-Comparison:"""
+JSON:"""
 }
+
+# Safety-aware refusal template
+REFUSAL_TEMPLATE = (
+    "I'm unable to help with that. I can offer general, safer guidance instead, "
+    "such as focusing on lawful, respectful, and safe alternatives."
+)

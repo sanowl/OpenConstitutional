@@ -45,7 +45,7 @@ class PreferenceModel(ConstitutionalAIModel):
         if principles is None:
             principles = self.constitutional_principles
             
-        # Format prompt
+        # Format prompt (JSON-structured output)
         principles_text = "\n".join(f"- {p}" for p in principles)
         prompt = PREFERENCE_TEMPLATES["comparison"].format(
             question=question,
@@ -59,14 +59,28 @@ class PreferenceModel(ConstitutionalAIModel):
             prompt=prompt,
             temperature=temperature or self.preference_temperature,
             max_length=self.config.model.max_length,
+            do_sample=True,
             num_return_sequences=1,
             return_full_text=False
         )
         
         preference_text = outputs[0].text.strip()
         
-        # Parse preference components
-        preference_output = self._parse_preference(preference_text, response_a, response_b)
+        # Parse JSON first; fallback to heuristic
+        parsed = self._parse_json_preference(preference_text)
+        if parsed is not None:
+            preferred = parsed.get("preferred", "A")
+            reasoning = parsed.get("reasoning", preference_text)
+            confidence = float(parsed.get("confidence", 0.5))
+            criteria_scores = parsed.get("criteria_scores", {})
+            preference_output = PreferenceOutput(
+                preferred_response=preferred if preferred in ("A", "B") else "A",
+                reasoning=reasoning,
+                confidence=confidence,
+                criteria_scores=criteria_scores if isinstance(criteria_scores, dict) else {}
+            )
+        else:
+            preference_output = self._parse_preference(preference_text, response_a, response_b)
         
         logger.debug(f"Generated preference: {preference_output.preferred_response}")
         
@@ -260,3 +274,19 @@ class PreferenceModel(ConstitutionalAIModel):
             analysis["avg_reasoning_length"] = sum(len(p.reasoning.split()) for p in preferences) / len(preferences)
             
         return analysis
+
+    def _parse_json_preference(self, text: str) -> Optional[Dict[str, Any]]:
+        """Attempt to parse a compact JSON preference."""
+        import json
+        start = text.find('{')
+        end = text.rfind('}')
+        if start == -1 or end == -1 or end <= start:
+            return None
+        candidate = text[start:end+1]
+        try:
+            obj = json.loads(candidate)
+            if isinstance(obj, dict):
+                return obj
+        except Exception:
+            return None
+        return None

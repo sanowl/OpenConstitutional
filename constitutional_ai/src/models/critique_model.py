@@ -62,19 +62,28 @@ class CritiqueModel(ConstitutionalAIModel):
         else:
             prompt = template.format(question=question, response=response)
             
-        # Generate critique
+        # Generate critique aiming for JSON output
         outputs = self.generate(
             prompt=prompt,
             temperature=temperature or self.critique_temperature,
             max_length=self.config.model.max_length,
+            do_sample=True,
             num_return_sequences=1,
             return_full_text=False
         )
-        
         critique_text = outputs[0].text.strip()
         
-        # Parse critique components (heuristic); prefer model-generated structure if present
-        critique_output = self._parse_critique(critique_text, principles)
+        # Try to parse JSON first, fallback to heuristic
+        parsed = self._parse_json_critique(critique_text)
+        if parsed is not None:
+            critique_output = CritiqueOutput(
+                critique=parsed.get("critique", critique_text),
+                principle_violations=parsed.get("violations", []),
+                severity_score=float(parsed.get("severity", 0.5)),
+                suggestions=parsed.get("suggestions", [])
+            )
+        else:
+            critique_output = self._parse_critique(critique_text, principles)
         
         logger.debug(f"Generated critique for {critique_type}: {critique_output.critique[:100]}...")
         
@@ -141,6 +150,23 @@ class CritiqueModel(ConstitutionalAIModel):
             severity_score=severity_score,
             suggestions=suggestions
         )
+
+    def _parse_json_critique(self, text: str) -> Optional[Dict[str, Any]]:
+        """Attempt to parse a compact JSON critique."""
+        import json
+        # Find JSON substring if extra text exists
+        start = text.find('{')
+        end = text.rfind('}')
+        if start == -1 or end == -1 or end <= start:
+            return None
+        candidate = text[start:end+1]
+        try:
+            obj = json.loads(candidate)
+            if isinstance(obj, dict):
+                return obj
+        except Exception:
+            return None
+        return None
         
     def evaluate_critique_quality(self, critique: CritiqueOutput, ground_truth: Optional[Dict[str, Any]] = None) -> Dict[str, float]:
         """Evaluate the quality of a generated critique."""

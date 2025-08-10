@@ -13,6 +13,7 @@ from tqdm import tqdm
 import os
 
 from ..models.reward_model import RewardModel
+from ..models.reward_cross_encoder import CrossEncoderRewardModel
 import torch.nn.functional as F
 from ..data_processing.preference_dataset import PreferenceDataset
 from ..utils.config import Config
@@ -220,26 +221,31 @@ class RewardTrainer:
         
     def _compute_loss(self, batch: Dict[str, Any]) -> torch.Tensor:
         """Compute pairwise ranking loss."""
+        # Cross-encoder path
+        if isinstance(self.reward_model, CrossEncoderRewardModel):
+            # Build texts from token ids is non-trivial; trainer expects raw text in dataset for cross-encoder mode.
+            # For simplicity, approximate reconstruction via tokenizer decode; better to wire raw text in dataset.
+            tok = self.reward_model.tokenizer
+            questions = [tok.decode(q_ids, skip_special_tokens=True) for q_ids in batch.get("question_input_ids", batch["chosen_input_ids"])[:]]
+            responses_a = [tok.decode(ids, skip_special_tokens=True) for ids in batch["chosen_input_ids"]]
+            responses_b = [tok.decode(ids, skip_special_tokens=True) for ids in batch["rejected_input_ids"]]
+            labels = torch.ones(len(responses_a), device=self.device)
+            loss = self.reward_model.compute_pairwise_loss(questions, responses_a, responses_b, labels)
+            return loss
         
-        # Get chosen and rejected responses
+        # Default separate-encoder path
         chosen_inputs = {
             "input_ids": batch["chosen_input_ids"],
             "attention_mask": batch["chosen_attention_mask"]
         }
-        
         rejected_inputs = {
             "input_ids": batch["rejected_input_ids"],
             "attention_mask": batch["rejected_attention_mask"]
         }
-        
-        # Forward pass through reward model
         chosen_outputs = self.reward_model(**chosen_inputs)
         rejected_outputs = self.reward_model(**rejected_inputs)
-        
-        # Compute pairwise ranking loss
         margin = chosen_outputs.rewards - rejected_outputs.rewards
         loss = F.binary_cross_entropy_with_logits(margin, torch.ones_like(margin))
-        
         return loss
         
     def _compute_accuracy(self, batch: Dict[str, Any]) -> float:

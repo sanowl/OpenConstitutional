@@ -13,6 +13,7 @@ import math
 
 from ..utils.config import Config
 from ..utils.logging import get_logger
+from sklearn.metrics import roc_auc_score, average_precision_score
 
 logger = get_logger(__name__)
 
@@ -81,6 +82,32 @@ class BenchmarkEvaluator:
                     results[metric_name] = {"error": str(e)}
                     
         return results
+
+    def compute_roc_pr_per_principle(
+        self,
+        human_labels: Dict[str, List[int]],
+        model_scores: Dict[str, List[float]]
+    ) -> Dict[str, Dict[str, float]]:
+        """Compute ROC-AUC and PR-AUC per principle.
+        human_labels: {principle: [0/1,...]}
+        model_scores: {principle: [score,...]}
+        """
+        out: Dict[str, Dict[str, float]] = {}
+        for principle, y_true in human_labels.items():
+            y_score = model_scores.get(principle)
+            if not y_score or len(y_score) != len(y_true):
+                out[principle] = {"roc_auc": float('nan'), "pr_auc": float('nan')}
+                continue
+            try:
+                roc = roc_auc_score(y_true, y_score)
+            except Exception:
+                roc = float('nan')
+            try:
+                pr = average_precision_score(y_true, y_score)
+            except Exception:
+                pr = float('nan')
+            out[principle] = {"roc_auc": float(roc), "pr_auc": float(pr)}
+        return out
         
     def _compute_bleu_score(
         self, responses: List[str], references: List[str]

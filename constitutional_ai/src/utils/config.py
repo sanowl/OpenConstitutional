@@ -47,6 +47,11 @@ class TrainingConfig:
     # Constitutional adherence regularization
     constitutional_penalty_weight: float = 0.2
     adherence_keywords: Optional[List[str]] = None
+    # Caching for generated critiques/revisions
+    cache_critiques_revisions: bool = True
+    cache_dir: str = "cache"
+    # Rewarding
+    use_cross_encoder_reward: bool = False
 
 
 @dataclass
@@ -59,6 +64,7 @@ class PPOConfig:
     init_kl_coef: float = 0.02
     target_kl: float = 0.1
     adap_kl_ctrl: bool = True
+    anneal_target_kl_factor: float = 1.0  # multiply target_kl each epoch
     gamma: float = 1.0
     lam: float = 0.95
     cliprange: float = 0.2
@@ -67,6 +73,11 @@ class PPOConfig:
     max_grad_norm: float = 0.5
     forward_batch_size: int = 4
     gradient_accumulation_steps: int = 1
+    per_token_shaping: str = "terminal"  # 'terminal' | 'uniform'
+    ref_refresh_interval: int = 0  # steps; 0=disabled
+    max_kl: float = 0.5  # early stop if exceeded persistently
+    early_stop_patience: int = 0  # steps over max_kl before stopping
+    use_bf16: bool = False
 
 
 @dataclass

@@ -10,6 +10,8 @@ from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass, asdict
 from datetime import datetime
 import hashlib
+import random
+import math
 
 from ..utils.config import Config
 from ..utils.logging import get_logger
@@ -447,6 +449,7 @@ class HumanEvaluation:
         evaluators = list(set(c.evaluator_id for c in comparisons))
         if len(evaluators) > 1:
             analysis["inter_evaluator_agreement"] = self._compute_inter_evaluator_agreement(comparisons)
+            analysis["fleiss_kappa"] = self._compute_fleiss_kappa(comparisons)
             
         return analysis
         
@@ -510,6 +513,74 @@ class HumanEvaluation:
             "average_agreement": sum(agreements) / len(agreements) if agreements else 0,
             "multiply_compared_items": len(multi_compared)
         }
+
+    def _compute_fleiss_kappa(self, comparisons: List[HumanComparison]) -> Dict[str, float]:
+        """Compute Fleiss' kappa for categorical preferences across multiple evaluators.
+        Categories: A, B, TIE.
+        """
+        # Group by (question, a, b)
+        from collections import defaultdict
+        item_to_votes = defaultdict(list)
+        for c in comparisons:
+            key = (c.question, c.response_a, c.response_b)
+            item_to_votes[key].append(c.preference.upper())
+
+        # Build category counts per item
+        categories = ["A", "B", "TIE"]
+        n_items = len(item_to_votes)
+        if n_items == 0:
+            return {"kappa": 0.0, "items": 0}
+        # All items should have the same number of ratings for strict Fleiss; if not, we'll allow varying by using average n
+        table = []
+        for votes in item_to_votes.values():
+            counts = [votes.count(cat) for cat in categories]
+            table.append(counts)
+
+        # Compute proportions
+        N = len(table)
+        n_per_item = [sum(row) for row in table]
+        if not all(n > 0 for n in n_per_item):
+            return {"kappa": 0.0, "items": N}
+        # Category proportions
+        total_ratings = sum(n_per_item)
+        p_j = [sum(row[j] for row in table) / total_ratings for j in range(len(categories))]
+        # Agreement per item
+        P_i = []
+        for row, n in zip(table, n_per_item):
+            if n <= 1:
+                P_i.append(0.0)
+            else:
+                P_i.append((sum(c * (c - 1) for c in row)) / (n * (n - 1)))
+        P_bar = sum(P_i) / N
+        P_e = sum(p ** 2 for p in p_j)
+        denom = (1 - P_e) if (1 - P_e) != 0 else 1e-8
+        kappa = (P_bar - P_e) / denom
+        return {"kappa": kappa, "items": N}
+
+    # Sampling utilities
+    def sample_judgment_indices(self, questions: List[str], n: int, seed: int = 42, stratify: bool = True) -> List[int]:
+        """Sample indices for judgments; optionally stratify by question length quartiles."""
+        rng = random.Random(seed)
+        idxs = list(range(len(questions)))
+        if not stratify or len(questions) == 0:
+            rng.shuffle(idxs)
+            return idxs[:n]
+        # Stratify by length quartiles
+        lengths = [(i, len(questions[i].split())) for i in idxs]
+        lengths.sort(key=lambda x: x[1])
+        q = 4
+        buckets = [lengths[i::q] for i in range(q)]  # round-robin bucketing after sort for balance
+        picked = []
+        per_bucket = max(1, n // q)
+        for b in buckets:
+            rng.shuffle(b)
+            picked.extend([i for i, _ in b[:per_bucket]])
+        if len(picked) < n:
+            # fill remainder randomly
+            remaining = [i for i in idxs if i not in picked]
+            rng.shuffle(remaining)
+            picked.extend(remaining[: n - len(picked)])
+        return picked[:n]
         
     def export_results(self, session_id: str, export_path: str):
         """Export evaluation results."""
