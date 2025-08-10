@@ -143,18 +143,30 @@ class Phase2Trainer:
         for i in range(min(num_samples, len(questions))):
             question = questions[i]
             
-            # Generate two different responses for the same question
+            # Generate two different responses for the same question using varied decoding
             response_a = self.policy_model.generate(
                 prompt=question,
-                temperature=0.8,
+                temperature=0.7,
+                top_p=0.9,
+                do_sample=True,
                 num_return_sequences=1
             )[0].text
-            
             response_b = self.policy_model.generate(
                 prompt=question,
-                temperature=0.9,
+                temperature=1.0,
+                top_p=0.7,
+                do_sample=True,
                 num_return_sequences=1
             )[0].text
+            if response_b.strip() == response_a.strip():
+                # simple perturbation: tweak temperature
+                response_b = self.policy_model.generate(
+                    prompt=question,
+                    temperature=1.2,
+                    top_p=0.9,
+                    do_sample=True,
+                    num_return_sequences=1
+                )[0].text
             
             response_pairs.append((response_a, response_b))
             
